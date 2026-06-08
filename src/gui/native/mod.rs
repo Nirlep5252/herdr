@@ -96,6 +96,13 @@ struct NativeApp {
     cursor_px: (f64, f64),
     selection: Option<Selection>,
     selecting: bool,
+    // A single long-lived clipboard handle. On X11 the process must keep
+    // owning the selection for the contents to persist, so we must not
+    // create/drop a handle per copy.
+    clipboard: Option<arboard::Clipboard>,
+    // Last text we copied, used as a paste fallback when the system clipboard
+    // is unreadable (e.g. headless X servers without a clipboard manager).
+    last_copied: Option<String>,
     error: Option<io::Error>,
 }
 
@@ -115,8 +122,24 @@ impl NativeApp {
             cursor_px: (0.0, 0.0),
             selection: None,
             selecting: false,
+            clipboard: None,
+            last_copied: None,
             error: None,
         }
+    }
+
+    /// Lazily creates and returns the shared clipboard handle.
+    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(clipboard) => self.clipboard = Some(clipboard),
+                Err(err) => {
+                    warn!(error = %err, "clipboard unavailable");
+                    return None;
+                }
+            }
+        }
+        self.clipboard.as_mut()
     }
 
     fn into_result(self) -> io::Result<()> {
@@ -414,19 +437,24 @@ impl NativeApp {
         let Some(sel) = self.selection.clone() else {
             return;
         };
-        let Some(panes) = self.panes.as_ref() else {
-            return;
+        let text = {
+            let Some(panes) = self.panes.as_ref() else {
+                return;
+            };
+            let Some(frame) = panes.frame(&sel.terminal_id) else {
+                return;
+            };
+            selection_text(frame, sel.anchor, sel.head)
         };
-        let Some(frame) = panes.frame(&sel.terminal_id) else {
-            return;
-        };
-        let text = selection_text(frame, sel.anchor, sel.head);
         if text.trim().is_empty() {
             return;
         }
-        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.clone())) {
-            Ok(()) => info!(len = text.len(), "copied selection to clipboard"),
-            Err(err) => warn!(error = %err, "failed to set clipboard"),
+        let len = text.len();
+        self.last_copied = Some(text.clone());
+        match self.clipboard().map(|cb| cb.set_text(text)) {
+            Some(Ok(())) => info!(len, "copied selection to clipboard"),
+            Some(Err(err)) => warn!(error = %err, "failed to set clipboard"),
+            None => {}
         }
     }
 
@@ -434,18 +462,16 @@ impl NativeApp {
         let Some(terminal_id) = self.focused_terminal() else {
             return;
         };
-        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-            Ok(text) => text,
-            Err(err) => {
-                warn!(error = %err, "failed to read clipboard");
-                return;
-            }
+        let system = self
+            .clipboard()
+            .and_then(|cb| cb.get_text().ok())
+            .filter(|text| !text.is_empty());
+        let text = match system.or_else(|| self.last_copied.clone()) {
+            Some(text) if !text.is_empty() => text,
+            _ => return,
         };
-        if text.is_empty() {
-            return;
-        }
         if let Some(panes) = self.panes.as_mut() {
-            panes.send_input(&terminal_id, vec![ClientInputEvent::Paste { text }]);
+            panes.send_bytes(&terminal_id, text.into_bytes());
         }
     }
 }
@@ -621,6 +647,25 @@ impl ApplicationHandler<UserEvent> for NativeApp {
     }
 }
 
+fn wheel_kinds(delta: MouseScrollDelta) -> Vec<ClientMouseKind> {
+    let (dx, dy) = match delta {
+        MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64),
+        MouseScrollDelta::PixelDelta(pos) => (pos.x / 16.0, pos.y / 16.0),
+    };
+    let mut kinds = Vec::new();
+    if dy > 0.0 {
+        kinds.push(ClientMouseKind::ScrollUp);
+    } else if dy < 0.0 {
+        kinds.push(ClientMouseKind::ScrollDown);
+    }
+    if dx > 0.0 {
+        kinds.push(ClientMouseKind::ScrollRight);
+    } else if dx < 0.0 {
+        kinds.push(ClientMouseKind::ScrollLeft);
+    }
+    kinds
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,23 +723,4 @@ mod tests {
         assert_eq!(forward, "bcd");
         assert_eq!(backward, "bcd");
     }
-}
-
-fn wheel_kinds(delta: MouseScrollDelta) -> Vec<ClientMouseKind> {
-    let (dx, dy) = match delta {
-        MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64),
-        MouseScrollDelta::PixelDelta(pos) => (pos.x / 16.0, pos.y / 16.0),
-    };
-    let mut kinds = Vec::new();
-    if dy > 0.0 {
-        kinds.push(ClientMouseKind::ScrollUp);
-    } else if dy < 0.0 {
-        kinds.push(ClientMouseKind::ScrollDown);
-    }
-    if dx > 0.0 {
-        kinds.push(ClientMouseKind::ScrollRight);
-    } else if dx < 0.0 {
-        kinds.push(ClientMouseKind::ScrollLeft);
-    }
-    kinds
 }

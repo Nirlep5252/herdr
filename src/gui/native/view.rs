@@ -413,7 +413,7 @@ fn draw_selection(
         let x = content.x + col_lo as i32 * cell_w;
         let w = (col_hi - col_lo + 1) as i32 * cell_w;
         let y = content.y + row as i32 * cell_h;
-        canvas.fill_rect_alpha(x, y, w, cell_h, ACCENT, 90);
+        canvas.fill_rect_alpha(x, y, w, cell_h, ACCENT, 130);
     }
 }
 

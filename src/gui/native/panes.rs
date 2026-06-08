@@ -137,6 +137,21 @@ impl PaneStreams {
             .and_then(|conn| conn.frame.as_ref())
     }
 
+    /// Writes raw bytes straight to a terminal's PTY (used for paste). Attach
+    /// connections deliver `Input` directly to their terminal, independent of
+    /// which pane the app considers focused.
+    pub fn send_bytes(&mut self, terminal_id: &str, data: Vec<u8>) {
+        if data.is_empty() {
+            return;
+        }
+        if let Some(conn) = self.conns.get_mut(terminal_id) {
+            let msg = ClientMessage::Input { data };
+            if let Err(err) = connection::write(&mut conn.write, &msg) {
+                warn!(terminal_id, error = %err, "pane byte input failed");
+            }
+        }
+    }
+
     /// Sends input events to a specific terminal.
     pub fn send_input(&mut self, terminal_id: &str, events: Vec<ClientInputEvent>) {
         if events.is_empty() {
