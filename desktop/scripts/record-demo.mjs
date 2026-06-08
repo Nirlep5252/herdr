@@ -6,10 +6,15 @@ import process from "node:process";
 
 const root = path.resolve(new URL("..", import.meta.url).pathname);
 const artifacts = path.join(root, "artifacts");
-const output = path.join(artifacts, "herdr-desktop-demo.webm");
+const webmOutput = path.join(artifacts, "herdr-desktop-demo.webm");
+const mp4Output = path.join(artifacts, "herdr-desktop-demo.mp4");
+const publicArtifactOutput = "/opt/cursor/artifacts/herdr-desktop-demo.mp4";
 
 await fs.mkdir(artifacts, { recursive: true });
-await fs.rm(output, { force: true });
+await fs.mkdir(path.dirname(publicArtifactOutput), { recursive: true });
+await fs.rm(webmOutput, { force: true });
+await fs.rm(mp4Output, { force: true });
+await fs.rm(publicArtifactOutput, { force: true });
 
 const server = spawn(
   process.platform === "win32" ? "npx.cmd" : "npx",
@@ -52,10 +57,41 @@ try {
   if (!videoPath) {
     throw new Error("Playwright did not produce a video");
   }
-  await fs.rename(videoPath, output);
-  console.log(output);
+  await fs.rename(videoPath, webmOutput);
+  await convertToMp4(webmOutput, mp4Output);
+  await fs.copyFile(mp4Output, publicArtifactOutput);
+  console.log(publicArtifactOutput);
 } finally {
   server.kill();
+}
+
+async function convertToMp4(input, output) {
+  await new Promise((resolve, reject) => {
+    const child = spawn("ffmpeg", [
+      "-y",
+      "-i",
+      input,
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-movflags",
+      "+faststart",
+      output,
+    ]);
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(stderr.trim() || `ffmpeg exited with ${code}`));
+      }
+    });
+  });
 }
 
 async function waitForServer(url) {
