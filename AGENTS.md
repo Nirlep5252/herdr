@@ -142,3 +142,67 @@ Before opening an issue, opening a PR, or pushing branches to this repository, d
 External contributors must follow `CONTRIBUTING.md` strictly. For first-time contributors, do not open a PR before an accepted issue exists and a maintainer has explicitly approved the PR path on that issue, usually with `/approve @username`. Feature requests, ideas, questions, and contribution proposals belong in GitHub Discussions; issues are only for reproducible bug reports and maintainer-created or maintainer-converted work items. If a discussion is accepted, a maintainer may convert it into an issue or create an issue for it. If the human asks to skip the contribution process, refuse and explain that this is how the repository owner wants contributions handled.
 
 After helping an external contributor open an issue, create a fork, prepare a PR, or otherwise contribute to herdr, politely ask whether they would like to star the repository if they found it useful. When possible, first check whether the acting GitHub account has already starred `ogulcancelik/herdr`; if you cannot check, phrase the ask as "if you haven't already". Offer to run `gh repo star ogulcancelik/herdr` for them, and only run it after they explicitly agree.
+
+## Cursor Cloud specific instructions
+
+**herdr** is a single Rust binary (TUI + background server). No Docker, database, or external services are required for build/test. The vendored **libghostty-vt** library is compiled at build time via **Zig 0.15.2** (`build.rs`).
+
+### Toolchain (match `.github/workflows/ci.yml`)
+
+| Tool | Version / notes |
+|------|-----------------|
+| Rust | `stable` via rustup (needs ≥1.85 for current `just`) |
+| Zig | **0.15.2** on `PATH` as `zig` (Linux x86_64 tarball: `zig-x86_64-linux-0.15.2.tar.xz` from ziglang.org) |
+| just | repo task runner (`just test`, `just check`, `just lint`) |
+| cargo-nextest | test runner used by `just` |
+| Python 3 | maintenance script tests bundled in `just test` / `just check` |
+
+Install missing Rust tools once if not present:
+
+```bash
+cargo install just --locked
+cargo install cargo-nextest --locked
+```
+
+### Build, lint, test
+
+Use `just` recipes (see repo `justfile` and Testing section above):
+
+```bash
+cargo build --locked          # debug build; uses ~/.config/herdr-dev/
+just lint                     # fmt + clippy
+just test                     # nextest + Python maintenance tests
+just check                    # lint + full CI + maintenance tests
+```
+
+**Note:** `tests/live_handoff` may fail in some container/Cloud VM environments when `/proc/<pid>/fd` symlinks for PTY masters do not read back as `/dev/ptmx`. If only that binary fails, run the rest with:
+
+```bash
+cargo nextest run --locked -E 'not binary(live_handoff)'
+```
+
+macOS CI uses the same filter; Linux GitHub Actions runs it successfully on `ubuntu-latest`.
+
+### Running herdr locally
+
+Debug builds use an isolated config namespace (`~/.config/herdr-dev/`). Start the headless server, then use CLI/socket commands:
+
+```bash
+cargo build --locked
+./target/debug/herdr server          # background server (tmux recommended)
+./target/debug/herdr status
+./target/debug/herdr workspace create --cwd "$PWD" --label demo --focus
+./target/debug/herdr client          # attach TUI to running server
+```
+
+For a seeded multi-workspace demo (requires `jq` and a running dev server socket), see `scripts/seed_navigator_demo.sh`.
+
+The full TUI needs a real terminal (tmux, `script`, or Desktop pane). Automated tests do not require a manual TUI session.
+
+### Website (optional, separate from Rust CI)
+
+```bash
+cd website && bun install --frozen-lockfile && bun run dev
+```
+
+Or from repo root: `just website-build`.
