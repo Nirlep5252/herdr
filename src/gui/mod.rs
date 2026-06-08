@@ -10,15 +10,19 @@
 use std::io;
 
 #[cfg(feature = "gui")]
-mod app;
-#[cfg(feature = "gui")]
 mod color;
 #[cfg(feature = "gui")]
 mod connection;
 #[cfg(feature = "gui")]
+mod draw;
+#[cfg(feature = "gui")]
 mod font;
 #[cfg(feature = "gui")]
 mod input;
+#[cfg(feature = "gui")]
+mod mirror;
+#[cfg(feature = "gui")]
+mod native;
 #[cfg(feature = "gui")]
 mod render;
 
@@ -26,6 +30,7 @@ mod render;
 #[derive(Debug, Default)]
 struct GuiArgs {
     snapshot: Option<std::path::PathBuf>,
+    mirror: bool,
     cols: u16,
     rows: u16,
 }
@@ -55,7 +60,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
         connection::ensure_server_running()?;
         match parsed.snapshot {
             Some(path) => snapshot::capture(&path, parsed.cols, parsed.rows),
-            None => app::run(),
+            None if parsed.mirror => mirror::run(),
+            None => native::run(),
         }
     }
 }
@@ -75,6 +81,10 @@ fn parse_args(args: &[String]) -> Result<GuiArgs, String> {
                 })?;
                 parsed.snapshot = Some(std::path::PathBuf::from(path));
                 i += 2;
+            }
+            "--mirror" => {
+                parsed.mirror = true;
+                i += 1;
             }
             "--cols" => {
                 let value = args
@@ -97,7 +107,8 @@ fn parse_args(args: &[String]) -> Result<GuiArgs, String> {
             "help" | "--help" | "-h" => {
                 println!("herdr gui — native desktop client");
                 println!();
-                println!("Usage: herdr gui");
+                println!("Usage: herdr gui                     native desktop UI (default)");
+                println!("       herdr gui --mirror            faithful TUI mirror renderer");
                 println!("       herdr gui --snapshot <path.png> [--cols N] [--rows N]");
                 std::process::exit(0);
             }

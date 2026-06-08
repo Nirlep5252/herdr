@@ -86,6 +86,53 @@ pub fn connect(geometry: Geometry) -> io::Result<LocalStream> {
     }
 }
 
+/// Connects and attaches to a single terminal, requesting semantic frames for
+/// just that terminal's grid. Used by the native UI to stream one pane.
+pub fn connect_attach(geometry: Geometry, terminal_id: &str) -> io::Result<LocalStream> {
+    let socket_path = client_socket_path();
+    let mut stream = ipc::connect_local_stream(&socket_path)?;
+    stream.set_nonblocking(false)?;
+
+    let hello = ClientMessage::Hello {
+        version: PROTOCOL_VERSION,
+        cols: geometry.cols,
+        rows: geometry.rows,
+        cell_width_px: geometry.cell_width_px,
+        cell_height_px: geometry.cell_height_px,
+        requested_encoding: RenderEncoding::SemanticFrame,
+        keybindings: ClientKeybindings::Server,
+        launch_mode: ClientLaunchMode::TerminalAttach,
+    };
+    write(&mut stream, &hello)?;
+
+    set_recv_timeout_best_effort(&stream, Some(HANDSHAKE_TIMEOUT))?;
+    let welcome: ServerMessage = read(&mut stream)?;
+    set_recv_timeout_best_effort(&stream, None)?;
+    match welcome {
+        ServerMessage::Welcome {
+            error: Some(error), ..
+        } => {
+            return Err(io::Error::other(format!("server rejected attach: {error}")));
+        }
+        ServerMessage::Welcome { .. } => {}
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected Welcome, got {other:?}"),
+            ))
+        }
+    }
+
+    write(
+        &mut stream,
+        &ClientMessage::AttachTerminal {
+            terminal_id: terminal_id.to_string(),
+            takeover: false,
+        },
+    )?;
+    Ok(stream)
+}
+
 /// Sets a receive timeout, treating "unsupported" (Windows named pipes) as a
 /// no-op so callers can rely on blocking reads on every platform.
 pub fn set_recv_timeout_best_effort(

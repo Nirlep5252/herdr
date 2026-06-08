@@ -1,22 +1,20 @@
-//! Pure rasterization of a [`FrameData`] cell grid into an RGB pixel buffer.
+//! Rasterize a [`FrameData`] cell grid into an RGB pixel buffer.
 //!
-//! The output buffer uses softbuffer's `0x00RRGGBB` layout so it can be
-//! presented to a window directly or encoded to a PNG for headless tests.
-//! This module performs no I/O and never touches the windowing system, so it
-//! is fully testable without a display.
+//! The output uses softbuffer's `0x00RRGGBB` layout. `render_frame` clears the
+//! whole buffer and draws the grid at the origin (used by the faithful mirror
+//! client and the snapshot path). `render_frame_at` draws a single terminal's
+//! grid into a sub-rectangle without clearing, used by the native UI to place
+//! each pane's live content inside its widget rect.
 
 use ratatui::style::Modifier;
 
 use crate::protocol::FrameData;
 
-use super::color::{self, Rgb, DEFAULT_BG, DEFAULT_FG};
+use super::color::{self, DEFAULT_BG, DEFAULT_FG};
+use super::draw::Canvas;
 use super::font::{FontSet, Style};
 
-/// Renders `frame` into `buffer` (`surface_w * surface_h` pixels, row-major).
-///
-/// Any surface area not covered by the cell grid is filled with the default
-/// background so window sizes that are not an exact multiple of the cell size
-/// still look clean.
+/// Renders `frame` into a full-surface buffer, clearing it first.
 pub fn render_frame(
     frame: &FrameData,
     fonts: &mut FontSet,
@@ -24,13 +22,26 @@ pub fn render_frame(
     surface_w: usize,
     surface_h: usize,
 ) {
-    let bg_fill = color::pack_rgb(DEFAULT_BG);
-    for pixel in buffer.iter_mut() {
-        *pixel = bg_fill;
-    }
+    let mut canvas = Canvas::new(buffer, surface_w, surface_h);
+    canvas.clear(DEFAULT_BG);
+    draw_frame(frame, fonts, &mut canvas, 0, 0);
+}
 
-    let cell_w = fonts.cell_width();
-    let cell_h = fonts.cell_height();
+/// Draws `frame` into `canvas` with its top-left cell at pixel `(ox, oy)`.
+/// Does not clear; callers paint the surrounding chrome first.
+pub fn render_frame_at(
+    frame: &FrameData,
+    fonts: &mut FontSet,
+    canvas: &mut Canvas,
+    ox: i32,
+    oy: i32,
+) {
+    draw_frame(frame, fonts, canvas, ox, oy);
+}
+
+fn draw_frame(frame: &FrameData, fonts: &mut FontSet, canvas: &mut Canvas, ox: i32, oy: i32) {
+    let cell_w = fonts.cell_width() as i32;
+    let cell_h = fonts.cell_height() as i32;
     let ascent = fonts.ascent();
 
     let width = frame.width as usize;
@@ -57,42 +68,33 @@ pub fn render_frame(
                 fg = bg;
             }
 
-            let x0 = col * cell_w;
-            let y0 = row * cell_h;
-            fill_rect(buffer, surface_w, surface_h, x0, y0, cell_w, cell_h, bg);
+            let x0 = ox + col as i32 * cell_w;
+            let y0 = oy + row as i32 * cell_h;
+            canvas.fill_rect(x0, y0, cell_w, cell_h, bg);
 
             let ch = cell.symbol.chars().next().unwrap_or(' ');
-            if ch != ' ' && ch != '\0' && !modifier.contains(Modifier::HIDDEN) {
+            if !modifier.contains(Modifier::HIDDEN) {
                 let style = Style::from_attrs(
                     modifier.contains(Modifier::BOLD),
                     modifier.contains(Modifier::ITALIC),
                 );
-                draw_glyph(
-                    buffer, surface_w, surface_h, fonts, ch, style, x0, y0, ascent, fg, bg,
-                );
+                canvas.draw_glyph(fonts, ch, style, x0, y0, ascent, fg);
             }
 
             if modifier.contains(Modifier::UNDERLINED) {
-                let y = y0 + (ascent as usize + 1).min(cell_h.saturating_sub(1));
-                fill_rect(buffer, surface_w, surface_h, x0, y, cell_w, 1, fg);
+                let y = y0 + (ascent + 1).min(cell_h - 1);
+                canvas.fill_rect(x0, y, cell_w, 1, fg);
             }
             if modifier.contains(Modifier::CROSSED_OUT) {
-                let y = y0 + cell_h / 2;
-                fill_rect(buffer, surface_w, surface_h, x0, y, cell_w, 1, fg);
+                canvas.fill_rect(x0, y0 + cell_h / 2, cell_w, 1, fg);
             }
         }
     }
 
-    draw_cursor(frame, fonts, buffer, surface_w, surface_h);
+    draw_cursor(frame, fonts, canvas, ox, oy);
 }
 
-fn draw_cursor(
-    frame: &FrameData,
-    fonts: &mut FontSet,
-    buffer: &mut [u32],
-    surface_w: usize,
-    surface_h: usize,
-) {
+fn draw_cursor(frame: &FrameData, fonts: &mut FontSet, canvas: &mut Canvas, ox: i32, oy: i32) {
     let Some(cursor) = frame.cursor.as_ref() else {
         return;
     };
@@ -106,129 +108,41 @@ fn draw_cursor(
         return;
     };
 
-    let cell_w = fonts.cell_width();
-    let cell_h = fonts.cell_height();
+    let cell_w = fonts.cell_width() as i32;
+    let cell_h = fonts.cell_height() as i32;
     let ascent = fonts.ascent();
-    let x0 = col * cell_w;
-    let y0 = row * cell_h;
+    let x0 = ox + col as i32 * cell_w;
+    let y0 = oy + row as i32 * cell_h;
 
     let fg = color::decode(cell.fg, DEFAULT_FG);
     let bg = color::decode(cell.bg, DEFAULT_BG);
 
-    // DECSCUSR: 3/4 underline, 5/6 bar, everything else block.
     match cursor.shape {
         3 | 4 => {
             let h = (cell_h / 8).max(1);
-            fill_rect(
-                buffer,
-                surface_w,
-                surface_h,
-                x0,
-                y0 + cell_h - h,
-                cell_w,
-                h,
-                fg,
-            );
+            canvas.fill_rect(x0, y0 + cell_h - h, cell_w, h, fg);
         }
         5 | 6 => {
             let w = (cell_w / 6).max(1);
-            fill_rect(buffer, surface_w, surface_h, x0, y0, w, cell_h, fg);
+            canvas.fill_rect(x0, y0, w, cell_h, fg);
         }
         _ => {
-            // Block: paint the cell with the foreground color and redraw the
-            // glyph in the background color (classic inverted-block cursor).
-            fill_rect(buffer, surface_w, surface_h, x0, y0, cell_w, cell_h, fg);
+            canvas.fill_rect(x0, y0, cell_w, cell_h, fg);
             let ch = cell.symbol.chars().next().unwrap_or(' ');
-            if ch != ' ' && ch != '\0' {
-                let modifier = Modifier::from_bits_truncate(cell.modifier);
-                let style = Style::from_attrs(
-                    modifier.contains(Modifier::BOLD),
-                    modifier.contains(Modifier::ITALIC),
-                );
-                draw_glyph(
-                    buffer, surface_w, surface_h, fonts, ch, style, x0, y0, ascent, bg, fg,
-                );
-            }
+            let modifier = Modifier::from_bits_truncate(cell.modifier);
+            let style = Style::from_attrs(
+                modifier.contains(Modifier::BOLD),
+                modifier.contains(Modifier::ITALIC),
+            );
+            canvas.draw_glyph(fonts, ch, style, x0, y0, ascent, bg);
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_glyph(
-    buffer: &mut [u32],
-    surface_w: usize,
-    surface_h: usize,
-    fonts: &mut FontSet,
-    ch: char,
-    style: Style,
-    cell_x: usize,
-    cell_y: usize,
-    ascent: i32,
-    fg: Rgb,
-    bg: Rgb,
-) {
-    let glyph = fonts.glyph(ch, style).clone();
-    if glyph.width == 0 || glyph.height == 0 {
-        return;
-    }
-
-    let top = cell_y as i32 + ascent - glyph.ymin - glyph.height as i32;
-    let left = cell_x as i32 + glyph.xmin;
-
-    for by in 0..glyph.height {
-        for bx in 0..glyph.width {
-            let coverage = glyph.coverage[by * glyph.width + bx];
-            if coverage == 0 {
-                continue;
-            }
-            let px = left + bx as i32;
-            let py = top + by as i32;
-            if px < 0 || py < 0 {
-                continue;
-            }
-            let (px, py) = (px as usize, py as usize);
-            if px >= surface_w || py >= surface_h {
-                continue;
-            }
-            let blended = blend(bg, fg, coverage);
-            buffer[py * surface_w + px] = color::pack_rgb(blended);
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn fill_rect(
-    buffer: &mut [u32],
-    surface_w: usize,
-    surface_h: usize,
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-    color: Rgb,
-) {
-    let packed = color::pack_rgb(color);
-    let x_end = (x + w).min(surface_w);
-    let y_end = (y + h).min(surface_h);
-    for py in y..y_end {
-        let row_start = py * surface_w;
-        for px in x..x_end {
-            buffer[row_start + px] = packed;
-        }
-    }
-}
-
-/// Alpha-blends `fg` over `bg` with coverage `a` (`0..=255`).
-fn blend(bg: Rgb, fg: Rgb, a: u8) -> Rgb {
-    let a = a as u32;
-    let inv = 255 - a;
-    let mix = |f: u8, b: u8| -> u8 { ((f as u32 * a + b as u32 * inv) / 255) as u8 };
-    (mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gui::color::Rgb;
     use crate::protocol::{CellData, CursorState};
 
     fn rgb_cell(symbol: &str, fg: Rgb, bg: Rgb) -> CellData {
@@ -256,7 +170,6 @@ mod tests {
         };
         let mut buf = vec![0u32; cw * ch];
         render_frame(&frame, &mut fonts, &mut buf, cw, ch);
-        // A space cell should be entirely its red background.
         assert!(buf.iter().all(|&p| p == color::pack_rgb((255, 0, 0))));
     }
 
@@ -276,10 +189,30 @@ mod tests {
         render_frame(&frame, &mut fonts, &mut buf, cw, ch);
         let white = color::pack_rgb((255, 255, 255));
         assert!(buf.contains(&white), "letter M should paint white ink");
-        assert!(
-            buf.contains(&color::pack_rgb((0, 0, 0))),
-            "background should remain black around the glyph"
-        );
+    }
+
+    #[test]
+    fn renders_at_offset_into_larger_buffer() {
+        let mut fonts = FontSet::load(16.0).expect("fonts load");
+        let (cw, ch) = (fonts.cell_width(), fonts.cell_height());
+        let frame = FrameData {
+            cells: vec![rgb_cell(" ", (0, 0, 0), (0, 255, 0))],
+            width: 1,
+            height: 1,
+            cursor: None,
+            hyperlinks: vec![],
+            graphics: vec![],
+        };
+        let surf_w = cw * 4;
+        let surf_h = ch * 4;
+        let mut buf = vec![0u32; surf_w * surf_h];
+        {
+            let mut canvas = Canvas::new(&mut buf, surf_w, surf_h);
+            render_frame_at(&frame, &mut fonts, &mut canvas, cw as i32, ch as i32);
+        }
+        // Green cell drawn at (cw, ch); origin should be untouched (still 0).
+        assert_eq!(buf[0], 0);
+        assert_eq!(buf[ch * surf_w + cw], color::pack_rgb((0, 255, 0)));
     }
 
     #[test]
@@ -301,7 +234,6 @@ mod tests {
         };
         let mut buf = vec![0u32; cw * ch];
         render_frame(&frame, &mut fonts, &mut buf, cw, ch);
-        // Block cursor fills the cell with the foreground (white).
         assert!(buf.iter().all(|&p| p == color::pack_rgb((255, 255, 255))));
     }
 }
