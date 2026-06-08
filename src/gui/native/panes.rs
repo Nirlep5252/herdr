@@ -24,6 +24,7 @@ struct PaneConn {
     frame: Option<FrameData>,
     cols: u16,
     rows: u16,
+    epoch: u64,
 }
 
 /// Manages one attach connection per visible terminal.
@@ -32,6 +33,7 @@ pub struct PaneStreams {
     cell_w: u32,
     cell_h: u32,
     conns: HashMap<String, PaneConn>,
+    next_epoch: u64,
 }
 
 impl PaneStreams {
@@ -41,6 +43,7 @@ impl PaneStreams {
             cell_w,
             cell_h,
             conns: HashMap::new(),
+            next_epoch: 1,
         }
     }
 
@@ -72,10 +75,17 @@ impl PaneStreams {
             cell_width_px: self.cell_w,
             cell_height_px: self.cell_h,
         };
+        let epoch = self.next_epoch;
+        self.next_epoch += 1;
         match connection::connect_attach(geometry, terminal_id) {
             Ok(stream) => match stream.try_clone() {
                 Ok(read_half) => {
-                    spawn_reader(read_half, terminal_id.to_string(), self.proxy.clone());
+                    spawn_reader(
+                        read_half,
+                        terminal_id.to_string(),
+                        epoch,
+                        self.proxy.clone(),
+                    );
                     self.conns.insert(
                         terminal_id.to_string(),
                         PaneConn {
@@ -83,6 +93,7 @@ impl PaneStreams {
                             frame: None,
                             cols,
                             rows,
+                            epoch,
                         },
                     );
                 }
@@ -92,20 +103,32 @@ impl PaneStreams {
         }
     }
 
-    /// Drops connections for terminals no longer visible.
-    pub fn retain_visible(&mut self, visible: &HashSet<String>) {
+    /// Drops connections for terminals not in `keep`.
+    pub fn retain_visible(&mut self, keep: &HashSet<String>) {
         self.conns
-            .retain(|terminal_id, _| visible.contains(terminal_id));
+            .retain(|terminal_id, _| keep.contains(terminal_id));
     }
 
-    pub fn set_frame(&mut self, terminal_id: &str, frame: FrameData) {
+    /// Stores a frame only if it came from the current connection epoch.
+    pub fn set_frame(&mut self, terminal_id: &str, epoch: u64, frame: FrameData) {
         if let Some(conn) = self.conns.get_mut(terminal_id) {
-            conn.frame = Some(frame);
+            if conn.epoch == epoch {
+                conn.frame = Some(frame);
+            }
         }
     }
 
-    pub fn remove(&mut self, terminal_id: &str) {
-        self.conns.remove(terminal_id);
+    /// Removes a connection only if the closing report matches the current
+    /// epoch, so a stale close from a previously dropped connection cannot tear
+    /// down a freshly reopened one.
+    pub fn close_if_current(&mut self, terminal_id: &str, epoch: u64) {
+        if self
+            .conns
+            .get(terminal_id)
+            .is_some_and(|conn| conn.epoch == epoch)
+        {
+            self.conns.remove(terminal_id);
+        }
     }
 
     pub fn frame(&self, terminal_id: &str) -> Option<&FrameData> {
@@ -128,7 +151,12 @@ impl PaneStreams {
     }
 }
 
-fn spawn_reader(mut stream: LocalStream, terminal_id: String, proxy: EventLoopProxy<UserEvent>) {
+fn spawn_reader(
+    mut stream: LocalStream,
+    terminal_id: String,
+    epoch: u64,
+    proxy: EventLoopProxy<UserEvent>,
+) {
     std::thread::Builder::new()
         .name(format!("herdr-gui-pane-{terminal_id}"))
         .spawn(move || loop {
@@ -136,6 +164,7 @@ fn spawn_reader(mut stream: LocalStream, terminal_id: String, proxy: EventLoopPr
                 Ok(ServerMessage::Frame(frame)) => {
                     let event = UserEvent::PaneFrame {
                         terminal_id: terminal_id.clone(),
+                        epoch,
                         frame,
                     };
                     if proxy.send_event(event).is_err() {
@@ -146,6 +175,7 @@ fn spawn_reader(mut stream: LocalStream, terminal_id: String, proxy: EventLoopPr
                     proxy
                         .send_event(UserEvent::PaneClosed {
                             terminal_id: terminal_id.clone(),
+                            epoch,
                         })
                         .ok();
                     break;
@@ -156,6 +186,7 @@ fn spawn_reader(mut stream: LocalStream, terminal_id: String, proxy: EventLoopPr
                     proxy
                         .send_event(UserEvent::PaneClosed {
                             terminal_id: terminal_id.clone(),
+                            epoch,
                         })
                         .ok();
                     break;

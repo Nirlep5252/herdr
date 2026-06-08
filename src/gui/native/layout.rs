@@ -12,7 +12,8 @@ pub const SIDEBAR_W: i32 = 230;
 pub const TABBAR_H: i32 = 38;
 const PANE_GAP: i32 = 6;
 pub const CAPTION_H: i32 = 22;
-pub const ROW_H: i32 = 28;
+/// Height of two-line sidebar rows (workspaces and agents).
+pub const ROW2_H: i32 = 44;
 const TAB_W: i32 = 150;
 const BTN_W: i32 = 36;
 
@@ -118,22 +119,22 @@ fn layout_sidebar(layout: &mut ViewLayout, model: &UiModel, surface_h: i32) {
     for ws in &model.workspaces {
         layout.workspace_rows.push(RowSlot {
             id: ws.workspace_id.clone(),
-            rect: Rect::new(pad, y, row_w, ROW_H),
+            rect: Rect::new(pad, y, row_w, ROW2_H),
             focused: Some(&ws.workspace_id) == model.active_workspace_id.as_ref(),
         });
-        y += ROW_H + 2;
+        y += ROW2_H + 2;
     }
 
-    // Agents section header sits ~34px down; rows follow.
+    // Agents section header sits ~30px down; rows follow.
     y += 36;
     for agent in &model.agents {
         let focused = Some(&agent.pane_id) == model.focused_pane_id.as_ref();
         layout.agent_rows.push(RowSlot {
             id: agent.terminal_id.clone(),
-            rect: Rect::new(pad, y, row_w, ROW_H),
+            rect: Rect::new(pad, y, row_w, ROW2_H),
             focused,
         });
-        y += ROW_H + 2;
+        y += ROW2_H + 2;
     }
 
     layout.new_workspace = Rect::new(pad, surface_h - 38, row_w, 28);

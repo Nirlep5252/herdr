@@ -47,12 +47,22 @@ pub enum UserEvent {
     Model(Box<UiModel>),
     PaneFrame {
         terminal_id: String,
+        epoch: u64,
         frame: FrameData,
     },
     PaneClosed {
         terminal_id: String,
+        epoch: u64,
     },
     ApiError(String),
+}
+
+/// An in-progress or completed text selection within a pane.
+#[derive(Debug, Clone)]
+struct Selection {
+    terminal_id: String,
+    anchor: (u16, u16),
+    head: (u16, u16),
 }
 
 /// Runs the native GUI. Assumes a server is reachable.
@@ -84,7 +94,8 @@ struct NativeApp {
     surface_size: (u32, u32),
     mods: ModifiersState,
     cursor_px: (f64, f64),
-    buttons: Vec<ClientMouseButton>,
+    selection: Option<Selection>,
+    selecting: bool,
     error: Option<io::Error>,
 }
 
@@ -102,7 +113,8 @@ impl NativeApp {
             surface_size: (0, 0),
             mods: ModifiersState::empty(),
             cursor_px: (0.0, 0.0),
-            buttons: Vec::new(),
+            selection: None,
+            selecting: false,
             error: None,
         }
     }
@@ -135,17 +147,32 @@ impl NativeApp {
         };
         let cell_w = self.fonts.cell_width() as i32;
         let cell_h = self.fonts.cell_height() as i32;
-        let mut visible = HashSet::new();
+        // Open/resize connections for panes in the active tab.
         for slot in &self.layout.panes {
             if slot.terminal_id.is_empty() {
                 continue;
             }
             let cols = (slot.content.w / cell_w).max(1) as u16;
             let rows = (slot.content.h / cell_h).max(1) as u16;
-            visible.insert(slot.terminal_id.clone());
             panes.ensure(&slot.terminal_id, cols, rows);
         }
-        panes.retain_visible(&visible);
+        // Keep connections for every pane in the workspace so switching tabs
+        // does not tear down and re-attach (which caused blank panes), only
+        // dropping terminals that left the workspace entirely.
+        let keep: HashSet<String> = self
+            .model
+            .panes
+            .iter()
+            .map(|pane| pane.terminal_id.clone())
+            .collect();
+        panes.retain_visible(&keep);
+    }
+
+    fn is_visible(&self, terminal_id: &str) -> bool {
+        self.layout
+            .panes
+            .iter()
+            .any(|slot| slot.terminal_id == terminal_id)
     }
 
     fn request_redraw(&self) {
@@ -163,6 +190,7 @@ impl NativeApp {
             layout,
             panes,
             surface_size,
+            selection,
             ..
         } = self;
         let (Some(surface), Some(window), Some(panes)) =
@@ -170,6 +198,11 @@ impl NativeApp {
         else {
             return;
         };
+        let highlight = selection.as_ref().map(|sel| view::Highlight {
+            terminal_id: sel.terminal_id.clone(),
+            start: sel.anchor,
+            end: sel.head,
+        });
         let (w, h) = *surface_size;
         let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else {
             return;
@@ -193,6 +226,7 @@ impl NativeApp {
             model,
             layout,
             panes,
+            highlight.as_ref(),
         );
         if let Err(err) = buffer.present() {
             warn!(error = %err, "failed to present buffer");
@@ -301,6 +335,143 @@ impl NativeApp {
             self.send_cmd(Cmd::FocusTarget(terminal_id));
         }
     }
+
+    /// Maps a pixel position to a pane's terminal id and clamped cell.
+    fn pane_cell_at(&self, x: i32, y: i32) -> Option<(String, u16, u16)> {
+        let cell_w = self.fonts.cell_width() as i32;
+        let cell_h = self.fonts.cell_height() as i32;
+        let panes = self.panes.as_ref()?;
+        for slot in &self.layout.panes {
+            if slot.terminal_id.is_empty() || !slot.content.contains(x, y) {
+                continue;
+            }
+            let (max_cols, max_rows) = panes
+                .frame(&slot.terminal_id)
+                .map(|f| (f.width, f.height))
+                .unwrap_or((
+                    (slot.content.w / cell_w).max(1) as u16,
+                    (slot.content.h / cell_h).max(1) as u16,
+                ));
+            let col =
+                (((x - slot.content.x) / cell_w).max(0) as u16).min(max_cols.saturating_sub(1));
+            let row =
+                (((y - slot.content.y) / cell_h).max(0) as u16).min(max_rows.saturating_sub(1));
+            return Some((slot.terminal_id.clone(), col, row));
+        }
+        None
+    }
+
+    fn begin_selection(&mut self, x: i32, y: i32) {
+        if let Some((terminal_id, col, row)) = self.pane_cell_at(x, y) {
+            self.selection = Some(Selection {
+                terminal_id,
+                anchor: (col, row),
+                head: (col, row),
+            });
+            self.selecting = true;
+            self.request_redraw();
+        } else {
+            self.clear_selection();
+        }
+    }
+
+    fn update_selection(&mut self) {
+        let (x, y) = (self.cursor_px.0 as i32, self.cursor_px.1 as i32);
+        let Some((terminal_id, col, row)) = self.pane_cell_at(x, y) else {
+            return;
+        };
+        if let Some(sel) = self.selection.as_mut() {
+            if sel.terminal_id == terminal_id {
+                sel.head = (col, row);
+                self.request_redraw();
+            }
+        }
+    }
+
+    fn finish_selection(&mut self) {
+        if !self.selecting {
+            return;
+        }
+        self.selecting = false;
+        match self.selection.as_ref() {
+            Some(sel) if sel.anchor == sel.head => {
+                // A plain click, not a drag: clear the (empty) selection.
+                self.clear_selection();
+            }
+            Some(_) => self.copy_selection(),
+            None => {}
+        }
+    }
+
+    fn clear_selection(&mut self) {
+        if self.selection.take().is_some() {
+            self.request_redraw();
+        }
+        self.selecting = false;
+    }
+
+    fn copy_selection(&mut self) {
+        let Some(sel) = self.selection.clone() else {
+            return;
+        };
+        let Some(panes) = self.panes.as_ref() else {
+            return;
+        };
+        let Some(frame) = panes.frame(&sel.terminal_id) else {
+            return;
+        };
+        let text = selection_text(frame, sel.anchor, sel.head);
+        if text.trim().is_empty() {
+            return;
+        }
+        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.clone())) {
+            Ok(()) => info!(len = text.len(), "copied selection to clipboard"),
+            Err(err) => warn!(error = %err, "failed to set clipboard"),
+        }
+    }
+
+    fn paste_into_focused(&mut self) {
+        let Some(terminal_id) = self.focused_terminal() else {
+            return;
+        };
+        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+            Ok(text) => text,
+            Err(err) => {
+                warn!(error = %err, "failed to read clipboard");
+                return;
+            }
+        };
+        if text.is_empty() {
+            return;
+        }
+        if let Some(panes) = self.panes.as_mut() {
+            panes.send_input(&terminal_id, vec![ClientInputEvent::Paste { text }]);
+        }
+    }
+}
+
+/// Extracts the text covered by a selection from a rendered frame.
+fn selection_text(frame: &FrameData, anchor: (u16, u16), head: (u16, u16)) -> String {
+    let (start, end) = view::ordered(anchor, head);
+    let width = frame.width as usize;
+    let mut lines: Vec<String> = Vec::new();
+    for row in start.1..=end.1.min(frame.height.saturating_sub(1)) {
+        let col_lo = if row == start.1 { start.0 } else { 0 };
+        let col_hi = if row == end.1 {
+            end.0
+        } else {
+            frame.width.saturating_sub(1)
+        };
+        let mut line = String::new();
+        for col in col_lo..=col_hi {
+            let idx = row as usize * width + col as usize;
+            if let Some(cell) = frame.cells.get(idx) {
+                line.push_str(&cell.symbol);
+            }
+        }
+        lines.push(line.trim_end().to_string());
+    }
+    lines.join("\n")
 }
 
 impl ApplicationHandler<UserEvent> for NativeApp {
@@ -357,15 +528,22 @@ impl ApplicationHandler<UserEvent> for NativeApp {
                 self.recompute();
                 self.request_redraw();
             }
-            UserEvent::PaneFrame { terminal_id, frame } => {
+            UserEvent::PaneFrame {
+                terminal_id,
+                epoch,
+                frame,
+            } => {
                 if let Some(panes) = self.panes.as_mut() {
-                    panes.set_frame(&terminal_id, frame);
+                    panes.set_frame(&terminal_id, epoch, frame);
                 }
-                self.request_redraw();
+                // Only repaint when the updated terminal is on the active tab.
+                if self.is_visible(&terminal_id) {
+                    self.request_redraw();
+                }
             }
-            UserEvent::PaneClosed { terminal_id } => {
+            UserEvent::PaneClosed { terminal_id, epoch } => {
                 if let Some(panes) = self.panes.as_mut() {
-                    panes.remove(&terminal_id);
+                    panes.close_if_current(&terminal_id, epoch);
                 }
                 self.request_redraw();
             }
@@ -406,8 +584,8 @@ impl ApplicationHandler<UserEvent> for NativeApp {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_px = (position.x, position.y);
-                if let Some(button) = self.buttons.first().copied() {
-                    self.forward_mouse_to_pane(ClientMouseKind::Drag(button));
+                if self.selecting {
+                    self.update_selection();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -415,21 +593,22 @@ impl ApplicationHandler<UserEvent> for NativeApp {
                     return;
                 };
                 let (x, y) = (self.cursor_px.0 as i32, self.cursor_px.1 as i32);
-                match state {
-                    ElementState::Pressed => {
-                        if !self.buttons.contains(&button) {
-                            self.buttons.push(button);
-                        }
-                        if button == ClientMouseButton::Left && self.handle_chrome_click(x, y) {
+                match (button, state) {
+                    (ClientMouseButton::Left, ElementState::Pressed) => {
+                        if self.handle_chrome_click(x, y) {
+                            self.clear_selection();
                             return;
                         }
                         self.focus_pane_at(x, y);
-                        self.forward_mouse_to_pane(ClientMouseKind::Down(button));
+                        self.begin_selection(x, y);
                     }
-                    ElementState::Released => {
-                        self.buttons.retain(|b| *b != button);
-                        self.forward_mouse_to_pane(ClientMouseKind::Up(button));
+                    (ClientMouseButton::Left, ElementState::Released) => {
+                        self.finish_selection();
                     }
+                    (ClientMouseButton::Right, ElementState::Pressed) => {
+                        self.paste_into_focused();
+                    }
+                    _ => {}
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -439,6 +618,65 @@ impl ApplicationHandler<UserEvent> for NativeApp {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::CellData;
+
+    fn frame_from(lines: &[&str]) -> FrameData {
+        let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+        let height = lines.len() as u16;
+        let mut cells = Vec::new();
+        for line in lines {
+            let chars: Vec<char> = line.chars().collect();
+            for col in 0..width as usize {
+                let symbol = chars.get(col).copied().unwrap_or(' ').to_string();
+                cells.push(CellData {
+                    symbol,
+                    fg: 0,
+                    bg: 0,
+                    modifier: 0,
+                    skip: false,
+                    hyperlink: None,
+                });
+            }
+        }
+        FrameData {
+            cells,
+            width,
+            height,
+            cursor: None,
+            hyperlinks: vec![],
+            graphics: vec![],
+        }
+    }
+
+    #[test]
+    fn selection_single_line_trims_trailing_space() {
+        let frame = frame_from(&["hello world   ", "second line"]);
+        // Select "hello world" on row 0 (cols 0..=10).
+        let text = selection_text(&frame, (0, 0), (10, 0));
+        assert_eq!(text, "hello world");
+    }
+
+    #[test]
+    fn selection_multi_line_joins_with_newline() {
+        let frame = frame_from(&["abcdef", "ghijkl"]);
+        // From (2,0) to (3,1): "cdef" + "\n" + "ghij".
+        let text = selection_text(&frame, (2, 0), (3, 1));
+        assert_eq!(text, "cdef\nghij");
+    }
+
+    #[test]
+    fn selection_handles_reversed_endpoints() {
+        let frame = frame_from(&["abcdef"]);
+        let forward = selection_text(&frame, (1, 0), (3, 0));
+        let backward = selection_text(&frame, (3, 0), (1, 0));
+        assert_eq!(forward, "bcd");
+        assert_eq!(backward, "bcd");
     }
 }
 

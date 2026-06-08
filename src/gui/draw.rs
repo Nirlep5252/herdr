@@ -69,6 +69,22 @@ impl<'a> Canvas<'a> {
         self.fill_rect(x + w - t, y, t, h, rgb);
     }
 
+    /// Fills a rectangle by blending `rgb` over existing pixels at `alpha`.
+    pub fn fill_rect_alpha(&mut self, x: i32, y: i32, w: i32, h: i32, rgb: Rgb, alpha: u8) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let x0 = x.max(0);
+        let y0 = y.max(0);
+        let x1 = (x + w).min(self.width as i32);
+        let y1 = (y + h).min(self.height as i32);
+        for py in y0..y1 {
+            for px in x0..x1 {
+                self.blend(px, py, rgb, alpha);
+            }
+        }
+    }
+
     /// Blends `rgb` over the existing pixel at `(x, y)` with coverage `cov`.
     #[inline]
     pub fn blend(&mut self, x: i32, y: i32, rgb: Rgb, cov: u8) {

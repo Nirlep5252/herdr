@@ -338,6 +338,7 @@ impl App {
                 .public_tab_id(index, ws.active_tab)
                 .unwrap_or_else(|| format!("{}:{}", ws.id, ws.active_tab + 1)),
             agent_status: pane_agent_status(agg_state, seen),
+            branch: ws.branch(),
             worktree: ws
                 .worktree_space()
                 .map(|space| crate::api::schema::WorkspaceWorktreeInfo {

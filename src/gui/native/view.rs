@@ -3,8 +3,9 @@
 //! Chrome (sidebar, tab strip, toolbar, pane captions) is custom-drawn with the
 //! shared [`Canvas`] primitives so it looks like a desktop app rather than a
 //! TUI. Each pane's live terminal content is composited into its content rect
-//! via `render::render_frame_at`. Colors follow a Catppuccin-Mocha palette so
-//! the app feels cohesive with herdr's default theme.
+//! via `render::render_frame_at`, with an optional selection highlight overlaid
+//! on top. Colors follow a Catppuccin-Mocha palette so the app feels cohesive
+//! with herdr's default theme.
 
 use crate::api::schema::{AgentStatus, PaneInfo};
 
@@ -31,6 +32,14 @@ const YELLOW: Rgb = (249, 226, 175);
 const BLUE: Rgb = (137, 180, 250);
 const GREEN: Rgb = (166, 227, 161);
 
+/// A text selection to highlight within one pane.
+#[derive(Debug, Clone)]
+pub struct Highlight {
+    pub terminal_id: String,
+    pub start: (u16, u16),
+    pub end: (u16, u16),
+}
+
 fn status_color(status: AgentStatus) -> Rgb {
     match status {
         AgentStatus::Blocked => RED,
@@ -41,11 +50,18 @@ fn status_color(status: AgentStatus) -> Rgb {
     }
 }
 
-fn row_text_y(rect: Rect, fonts: &FontSet) -> i32 {
-    rect.y + (rect.h - fonts.cell_height() as i32) / 2
+fn status_text(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Blocked => "blocked",
+        AgentStatus::Working => "working",
+        AgentStatus::Done => "done",
+        AgentStatus::Idle => "idle",
+        AgentStatus::Unknown => "idle",
+    }
 }
 
 /// Renders the entire native UI into `buffer`.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     buffer: &mut [u32],
     surface_w: usize,
@@ -54,17 +70,20 @@ pub fn render(
     model: &UiModel,
     layout: &ViewLayout,
     panes: &PaneStreams,
+    selection: Option<&Highlight>,
 ) {
     let mut canvas = Canvas::new(buffer, surface_w, surface_h);
     canvas.clear(BASE);
 
     draw_sidebar(&mut canvas, fonts, model, layout);
     draw_tabbar(&mut canvas, fonts, model, layout);
-    draw_panes(&mut canvas, fonts, model, layout, panes);
+    draw_panes(&mut canvas, fonts, model, layout, panes, selection);
 }
 
 fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layout: &ViewLayout) {
     let sb = layout.sidebar;
+    let cell_h = fonts.cell_height() as i32;
+    let cell_w = fonts.cell_width() as i32;
     canvas.fill_rect(sb.x, sb.y, sb.w, sb.h, MANTLE);
     canvas.fill_rect(sb.x + sb.w - 1, sb.y, 1, sb.h, CRUST);
 
@@ -73,36 +92,60 @@ fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layou
     canvas.text(fonts, pad, 10, "SPACES", Style::Bold, OVERLAY, label_max);
 
     for row in &layout.workspace_rows {
+        let Some(ws) = model.workspaces.iter().find(|w| w.workspace_id == row.id) else {
+            continue;
+        };
         if row.focused {
             canvas.fill_rect(row.rect.x, row.rect.y, row.rect.w, row.rect.h, SURFACE0);
             canvas.fill_rect(row.rect.x, row.rect.y, 3, row.rect.h, ACCENT);
         }
-        if let Some(ws) = model.workspaces.iter().find(|w| w.workspace_id == row.id) {
-            canvas.dot(
-                row.rect.x + 14,
-                row.rect.y + row.rect.h / 2,
-                4,
-                status_color(ws.agent_status),
-            );
-            let label = draw::truncate_cells(
-                &ws.label,
-                ((row.rect.w - 30) / fonts.cell_width() as i32).max(1) as usize,
-            );
-            let fg = if row.focused { TEXT } else { SUBTEXT };
+        let line1_y = row.rect.y + 6;
+        let line2_y = line1_y + cell_h + 2;
+        canvas.dot(
+            row.rect.x + 14,
+            line1_y + cell_h / 2,
+            4,
+            status_color(ws.agent_status),
+        );
+        let max_cells = ((row.rect.w - 30) / cell_w).max(1) as usize;
+        let label = draw::truncate_cells(&ws.label, max_cells);
+        let fg = if row.focused { TEXT } else { SUBTEXT };
+        canvas.text(
+            fonts,
+            row.rect.x + 26,
+            line1_y,
+            &label,
+            Style::Bold,
+            fg,
+            label_max,
+        );
+        if let Some(branch) = ws.branch.as_deref().filter(|b| !b.is_empty()) {
+            let sub = draw::truncate_cells(branch, max_cells);
             canvas.text(
                 fonts,
                 row.rect.x + 26,
-                row_text_y(row.rect, fonts),
-                &label,
+                line2_y,
+                &sub,
                 Style::Regular,
-                fg,
+                OVERLAY,
+                label_max,
+            );
+        } else if let Some(worktree) = ws.worktree.as_ref() {
+            let sub = draw::truncate_cells(&worktree.repo_name, max_cells);
+            canvas.text(
+                fonts,
+                row.rect.x + 26,
+                line2_y,
+                &sub,
+                Style::Regular,
+                OVERLAY,
                 label_max,
             );
         }
     }
 
     if !layout.agent_rows.is_empty() {
-        let header_y = layout.agent_rows[0].rect.y - 26;
+        let header_y = layout.agent_rows[0].rect.y - 24;
         canvas.text(
             fonts,
             pad,
@@ -114,47 +157,67 @@ fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layou
         );
     }
     for row in &layout.agent_rows {
+        let Some(agent) = model.agents.iter().find(|a| a.terminal_id == row.id) else {
+            continue;
+        };
         if row.focused {
             canvas.fill_rect(row.rect.x, row.rect.y, row.rect.w, row.rect.h, SURFACE0);
             canvas.fill_rect(row.rect.x, row.rect.y, 3, row.rect.h, ACCENT);
         }
-        if let Some(agent) = model.agents.iter().find(|a| a.terminal_id == row.id) {
-            canvas.dot(
-                row.rect.x + 14,
-                row.rect.y + row.rect.h / 2,
-                4,
-                status_color(agent.agent_status),
-            );
-            let name = agent
-                .name
-                .as_deref()
-                .or(agent.display_agent.as_deref())
-                .or(agent.agent.as_deref())
-                .unwrap_or("agent");
-            let label = draw::truncate_cells(
-                name,
-                ((row.rect.w - 30) / fonts.cell_width() as i32).max(1) as usize,
-            );
-            let fg = if row.focused { TEXT } else { SUBTEXT };
-            canvas.text(
-                fonts,
-                row.rect.x + 26,
-                row_text_y(row.rect, fonts),
-                &label,
-                Style::Regular,
-                fg,
-                label_max,
-            );
-        }
+        let line1_y = row.rect.y + 6;
+        let line2_y = line1_y + cell_h + 2;
+        canvas.dot(
+            row.rect.x + 14,
+            line1_y + cell_h / 2,
+            4,
+            status_color(agent.agent_status),
+        );
+
+        let ws_label = model
+            .workspaces
+            .iter()
+            .find(|w| w.workspace_id == agent.workspace_id);
+        let title = match ws_label {
+            Some(ws) => format!("{} · {}", ws.label, ws.number),
+            None => agent.workspace_id.clone(),
+        };
+        let max_cells = ((row.rect.w - 30) / cell_w).max(1) as usize;
+        let fg = if row.focused { TEXT } else { SUBTEXT };
+        canvas.text(
+            fonts,
+            row.rect.x + 26,
+            line1_y,
+            &draw::truncate_cells(&title, max_cells),
+            Style::Bold,
+            fg,
+            label_max,
+        );
+
+        let agent_label = agent
+            .name
+            .as_deref()
+            .or(agent.display_agent.as_deref())
+            .or(agent.agent.as_deref())
+            .unwrap_or("agent");
+        let detail = format!("{} · {}", status_text(agent.agent_status), agent_label);
+        canvas.text(
+            fonts,
+            row.rect.x + 26,
+            line2_y,
+            &draw::truncate_cells(&detail, max_cells),
+            Style::Regular,
+            status_color(agent.agent_status),
+            label_max,
+        );
     }
 
-    // New-workspace button.
     let nw = layout.new_workspace;
     canvas.fill_rect(nw.x, nw.y, nw.w, nw.h, SURFACE0);
+    let nw_y = nw.y + (nw.h - cell_h) / 2;
     canvas.text(
         fonts,
         nw.x + 10,
-        row_text_y(nw, fonts),
+        nw_y,
         "+ new space",
         Style::Regular,
         TEXT,
@@ -164,6 +227,9 @@ fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layou
 
 fn draw_tabbar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layout: &ViewLayout) {
     let tb = layout.tabbar;
+    let cell_w = fonts.cell_width() as i32;
+    let cell_h = fonts.cell_height() as i32;
+    let text_y = |rect: Rect| rect.y + (rect.h - cell_h) / 2;
     canvas.fill_rect(tb.x, tb.y, tb.w, tb.h, CRUST);
     canvas.fill_rect(tb.x, tb.y + tb.h - 1, tb.w, 1, MANTLE);
 
@@ -174,20 +240,19 @@ fn draw_tabbar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layout
             canvas.fill_rect(tab.rect.x, tab.rect.y, tab.rect.w, 2, ACCENT);
         }
         if let Some(info) = model.tabs.iter().find(|t| t.tab_id == tab.tab_id) {
-            let max_cells = ((tab.rect.w - 36) / fonts.cell_width() as i32).max(1) as usize;
+            let max_cells = ((tab.rect.w - 36) / cell_w).max(1) as usize;
             let label = draw::truncate_cells(&info.label, max_cells);
             let fg = if tab.focused { TEXT } else { SUBTEXT };
             canvas.text(
                 fonts,
                 tab.rect.x + 10,
-                row_text_y(tab.rect, fonts),
+                text_y(tab.rect),
                 &label,
                 Style::Regular,
                 fg,
                 tab.close.x,
             );
         }
-        // Close glyph.
         canvas.draw_glyph(
             fonts,
             '×',
@@ -199,20 +264,18 @@ fn draw_tabbar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layout
         );
     }
 
-    // New-tab button.
     let nt = layout.new_tab;
     canvas.fill_rect(nt.x, nt.y, nt.w, nt.h, SURFACE0);
     canvas.draw_glyph(
         fonts,
         '+',
         Style::Bold,
-        nt.x + (nt.w - fonts.cell_width() as i32) / 2,
-        row_text_y(nt, fonts),
+        nt.x + (nt.w - cell_w) / 2,
+        text_y(nt),
         fonts.ascent(),
         TEXT,
     );
 
-    // Toolbar buttons (act on focused pane).
     draw_split_button(canvas, layout.btn_split_right, true);
     draw_split_button(canvas, layout.btn_split_down, false);
     let cp = layout.btn_close_pane;
@@ -221,8 +284,8 @@ fn draw_tabbar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layout
         fonts,
         '×',
         Style::Bold,
-        cp.x + (cp.w - fonts.cell_width() as i32) / 2,
-        row_text_y(cp, fonts),
+        cp.x + (cp.w - cell_w) / 2,
+        text_y(cp),
         fonts.ascent(),
         TEXT,
     );
@@ -230,7 +293,6 @@ fn draw_tabbar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layout
 
 fn draw_split_button(canvas: &mut Canvas, rect: Rect, vertical: bool) {
     canvas.fill_rect(rect.x, rect.y, rect.w, rect.h, SURFACE0);
-    // Draw a small icon: a bordered box divided into two halves.
     let icon = Rect::new(rect.x + rect.w / 2 - 7, rect.y + rect.h / 2 - 6, 14, 12);
     canvas.stroke_rect(icon.x, icon.y, icon.w, icon.h, 1, TEXT);
     if vertical {
@@ -255,9 +317,11 @@ fn draw_panes(
     model: &UiModel,
     layout: &ViewLayout,
     panes: &PaneStreams,
+    selection: Option<&Highlight>,
 ) {
+    let cell_w = fonts.cell_width() as i32;
+    let cell_h = fonts.cell_height() as i32;
     for slot in &layout.panes {
-        // Pane background + caption.
         canvas.fill_rect(
             slot.rect.x,
             slot.rect.y,
@@ -280,10 +344,9 @@ fn draw_panes(
                 4,
                 status_color(pane.agent_status),
             );
-            let label = caption_label(pane);
-            let max_cells = ((slot.rect.w - 30) / fonts.cell_width() as i32).max(1) as usize;
-            let label = draw::truncate_cells(&label, max_cells);
-            let y = slot.rect.y + (CAPTION_H - fonts.cell_height() as i32) / 2;
+            let max_cells = ((slot.rect.w - 30) / cell_w).max(1) as usize;
+            let label = draw::truncate_cells(&caption_label(pane), max_cells);
+            let y = slot.rect.y + (CAPTION_H - cell_h) / 2;
             let fg = if slot.focused { TEXT } else { SUBTEXT };
             canvas.text(
                 fonts,
@@ -296,12 +359,21 @@ fn draw_panes(
             );
         }
 
-        // Live terminal content.
         if let Some(frame) = panes.frame(&slot.terminal_id) {
             render::render_frame_at(frame, fonts, canvas, slot.content.x, slot.content.y);
+            if let Some(hl) = selection.filter(|h| h.terminal_id == slot.terminal_id) {
+                draw_selection(
+                    canvas,
+                    slot.content,
+                    frame.width,
+                    frame.height,
+                    cell_w,
+                    cell_h,
+                    hl,
+                );
+            }
         }
 
-        // Focus border.
         let border = if slot.focused { ACCENT } else { SURFACE0 };
         let thickness = if slot.focused { 2 } else { 1 };
         canvas.stroke_rect(
@@ -312,5 +384,44 @@ fn draw_panes(
             thickness,
             border,
         );
+    }
+}
+
+fn draw_selection(
+    canvas: &mut Canvas,
+    content: Rect,
+    width: u16,
+    height: u16,
+    cell_w: i32,
+    cell_h: i32,
+    hl: &Highlight,
+) {
+    let (start, end) = ordered(hl.start, hl.end);
+    for row in start.1..=end.1 {
+        if row >= height {
+            break;
+        }
+        let col_lo = if row == start.1 { start.0 } else { 0 };
+        let col_hi = if row == end.1 {
+            end.0
+        } else {
+            width.saturating_sub(1)
+        };
+        if col_hi < col_lo {
+            continue;
+        }
+        let x = content.x + col_lo as i32 * cell_w;
+        let w = (col_hi - col_lo + 1) as i32 * cell_w;
+        let y = content.y + row as i32 * cell_h;
+        canvas.fill_rect_alpha(x, y, w, cell_h, ACCENT, 90);
+    }
+}
+
+/// Orders two cell coordinates into reading order (start <= end).
+pub fn ordered(a: (u16, u16), b: (u16, u16)) -> ((u16, u16), (u16, u16)) {
+    if (a.1, a.0) <= (b.1, b.0) {
+        (a, b)
+    } else {
+        (b, a)
     }
 }
