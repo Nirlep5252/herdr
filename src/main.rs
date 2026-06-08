@@ -54,6 +54,7 @@ mod config;
 mod detect;
 mod events;
 mod ghostty;
+mod gui;
 mod handoff_runtime;
 mod input;
 mod integration;
@@ -408,6 +409,12 @@ fn main() -> io::Result<()> {
         return server::headless::run_server();
     }
 
+    if args.get(1).map(|s| s.as_str()) == Some("gui") {
+        let loaded_config = config::Config::load();
+        exit_if_nested_disabled(&loaded_config.config);
+        return gui::run(&args[2..]);
+    }
+
     // Hidden client mode: connect to an existing server's client socket.
     if args.get(1).map(|s| s.as_str()) == Some("client") {
         let loaded_config = config::Config::load();
@@ -445,6 +452,7 @@ fn main() -> io::Result<()> {
         println!("herdr — terminal workspace manager for AI coding agents");
         println!();
         println!("Usage: herdr [options]");
+        println!("       herdr gui");
         println!("       herdr --session <name> [options]");
         println!("       herdr --remote <ssh-target> [--session <name>]");
         println!("       herdr session attach <name>");
@@ -467,6 +475,7 @@ fn main() -> io::Result<()> {
         println!("Common commands:");
         for (command, description) in [
             ("herdr", "Launch or attach to the persistent session"),
+            ("herdr gui", "Launch the native desktop GUI client"),
             (
                 "herdr status [server|client]",
                 "Show local client and running server status",
@@ -583,6 +592,7 @@ fn main() -> io::Result<()> {
             && ![
                 "server",
                 "client",
+                "gui",
                 "remote-client-bridge",
                 "update",
                 "status",

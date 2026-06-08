@@ -9,7 +9,12 @@ repository = "https://github.com/ogulcancelik/herdr"
 homepage = "https://herdr.dev"
 keywords = ["terminal", "tui", "ai", "agents", "multiplexer"]
 categories = ["command-line-utilities"]
-include = ["src/**/*", "assets/sounds/*", "README.md", "LICENSE", "Cargo.toml"]
+include = ["src/**/*", "assets/sounds/*", "assets/fonts/*", "README.md", "LICENSE", "Cargo.toml"]
+
+[features]
+default = ["gui"]
+# Native desktop GUI client (`herdr gui`). Pulls in windowing + CPU rendering deps.
+gui = ["dep:winit", "dep:softbuffer", "dep:fontdue"]
 
 [dependencies]
 base64 = "0.22.1"
@@ -31,6 +36,11 @@ toml = "0.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 unicode-width = "0.2"
+
+# GUI client (optional, enabled by the `gui` feature).
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+fontdue = { version = "0.9", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
