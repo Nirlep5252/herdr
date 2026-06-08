@@ -26,6 +26,8 @@ pub enum Method {
     ServerReloadConfig(EmptyParams),
     #[serde(rename = "notification.show")]
     NotificationShow(NotificationShowParams),
+    #[serde(rename = "desktop.snapshot")]
+    DesktopSnapshot(EmptyParams),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreateParams),
     #[serde(rename = "workspace.list")]
@@ -592,6 +594,9 @@ pub enum ResponseResult {
     WorkspaceList {
         workspaces: Vec<WorkspaceInfo>,
     },
+    DesktopSnapshot {
+        snapshot: DesktopSnapshot,
+    },
     WorktreeList {
         source: WorktreeSourceInfo,
         worktrees: Vec<WorktreeInfo>,
@@ -705,6 +710,22 @@ pub struct WorkspaceInfo {
     pub agent_status: AgentStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorkspaceWorktreeInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DesktopSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tab_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused_pane_id: Option<String>,
+    pub workspaces: Vec<WorkspaceInfo>,
+    pub tabs: Vec<TabInfo>,
+    pub panes: Vec<PaneInfo>,
+    pub agents: Vec<AgentInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_layout: Option<PaneLayoutSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
