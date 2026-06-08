@@ -59,9 +59,11 @@ pub fn connect(geometry: Geometry) -> io::Result<LocalStream> {
     };
     write(&mut stream, &hello)?;
 
-    stream.set_recv_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    // Named pipes (Windows) reject recv timeouts; the server sends Welcome
+    // immediately, so a plain blocking read is fine there.
+    set_recv_timeout_best_effort(&stream, Some(HANDSHAKE_TIMEOUT))?;
     let welcome: ServerMessage = read(&mut stream)?;
-    stream.set_recv_timeout(None)?;
+    set_recv_timeout_best_effort(&stream, None)?;
 
     match welcome {
         ServerMessage::Welcome {
@@ -81,6 +83,19 @@ pub fn connect(geometry: Geometry) -> io::Result<LocalStream> {
             io::ErrorKind::InvalidData,
             format!("expected Welcome, got {other:?}"),
         )),
+    }
+}
+
+/// Sets a receive timeout, treating "unsupported" (Windows named pipes) as a
+/// no-op so callers can rely on blocking reads on every platform.
+pub fn set_recv_timeout_best_effort(
+    stream: &LocalStream,
+    timeout: Option<Duration>,
+) -> io::Result<()> {
+    match stream.set_recv_timeout(timeout) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => Ok(()),
+        Err(err) => Err(err),
     }
 }
 

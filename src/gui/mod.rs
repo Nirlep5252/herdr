@@ -117,8 +117,6 @@ mod snapshot {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    use interprocess::local_socket::traits::Stream as _;
-
     use crate::protocol::ServerMessage;
 
     use super::connection::{self, Geometry};
@@ -138,7 +136,7 @@ mod snapshot {
         };
 
         let mut stream = connection::connect(geometry)?;
-        stream.set_recv_timeout(Some(Duration::from_millis(500)))?;
+        connection::set_recv_timeout_best_effort(&stream, Some(Duration::from_millis(500)))?;
 
         let deadline = Instant::now() + FRAME_DEADLINE;
         let frame = loop {
