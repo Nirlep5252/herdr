@@ -1,4 +1,8 @@
 /target
+/desktop/artifacts/
+/desktop/dist/
+/desktop/dist-electron/
+/desktop/node_modules/
 /vendor/libghostty-vt/zig-pkg/
 __pycache__/
 *.pyc

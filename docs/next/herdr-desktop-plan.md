@@ -67,8 +67,16 @@ Build the single-window app around the server contract:
 - render real terminal panes
 - route native shortcuts to Herdr actions
 
-The toolkit remains open. Responsiveness and terminal fidelity are the deciding
-constraints.
+The initial implementation lives in `desktop/` as an Electron + Vite + xterm.js
+app. Electron was chosen for the first Windows/Linux slice because it avoids
+Linux WebKitGTK packaging friction, gives predictable native shortcut handling,
+and lets Herdr reuse xterm's mature terminal grid while the Rust server remains
+the process/session owner.
+
+The first terminal bridge reads visible ANSI frames through the existing socket
+API and routes typed bytes back through `pane.send_text`. A later backend slice
+should replace polling with a per-pane `FrameData` subscription so the desktop
+client can render lower-latency terminal diffs and richer cursor/graphics state.
 
 ### 4. Settings, integrations, and packaging
 

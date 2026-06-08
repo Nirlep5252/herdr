@@ -1,0 +1,25 @@
+{
+  "name": "@herdr/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Herdr Desktop single-window GUI client",
+  "main": "dist-electron/electron/main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "electron": "npm run build && electron .",
+    "build": "tsc -p tsconfig.electron.json && vite build",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "demo:video": "npm run build && node scripts/record-demo.mjs"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0"
+  },
+  "devDependencies": {
+    "electron": "^42.3.3",
+    "playwright": "^1.60.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16"
+  }
+}
