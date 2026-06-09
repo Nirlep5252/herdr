@@ -24,24 +24,22 @@ struct PaneConn {
     frame: Option<FrameData>,
     cols: u16,
     rows: u16,
+    cell_w: u32,
+    cell_h: u32,
     epoch: u64,
 }
 
 /// Manages one attach connection per visible terminal.
 pub struct PaneStreams {
     proxy: EventLoopProxy<UserEvent>,
-    cell_w: u32,
-    cell_h: u32,
     conns: HashMap<String, PaneConn>,
     next_epoch: u64,
 }
 
 impl PaneStreams {
-    pub fn new(proxy: EventLoopProxy<UserEvent>, cell_w: u32, cell_h: u32) -> Self {
+    pub fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
         Self {
             proxy,
-            cell_w,
-            cell_h,
             conns: HashMap::new(),
             next_epoch: 1,
         }
@@ -49,18 +47,24 @@ impl PaneStreams {
 
     /// Opens a connection for `terminal_id` if needed, or resizes an existing
     /// one when its grid dimensions change.
-    pub fn ensure(&mut self, terminal_id: &str, cols: u16, rows: u16) {
+    pub fn ensure(&mut self, terminal_id: &str, cols: u16, rows: u16, cell_w: u32, cell_h: u32) {
         let cols = cols.max(1);
         let rows = rows.max(1);
         if let Some(conn) = self.conns.get_mut(terminal_id) {
-            if conn.cols != cols || conn.rows != rows {
+            if conn.cols != cols
+                || conn.rows != rows
+                || conn.cell_w != cell_w
+                || conn.cell_h != cell_h
+            {
                 conn.cols = cols;
                 conn.rows = rows;
+                conn.cell_w = cell_w;
+                conn.cell_h = cell_h;
                 let msg = ClientMessage::Resize {
                     cols,
                     rows,
-                    cell_width_px: self.cell_w,
-                    cell_height_px: self.cell_h,
+                    cell_width_px: cell_w,
+                    cell_height_px: cell_h,
                 };
                 if let Err(err) = connection::write(&mut conn.write, &msg) {
                     warn!(terminal_id, error = %err, "pane resize failed");
@@ -72,8 +76,8 @@ impl PaneStreams {
         let geometry = Geometry {
             cols,
             rows,
-            cell_width_px: self.cell_w,
-            cell_height_px: self.cell_h,
+            cell_width_px: cell_w,
+            cell_height_px: cell_h,
         };
         let epoch = self.next_epoch;
         self.next_epoch += 1;
@@ -93,6 +97,8 @@ impl PaneStreams {
                             frame: None,
                             cols,
                             rows,
+                            cell_w,
+                            cell_h,
                             epoch,
                         },
                     );

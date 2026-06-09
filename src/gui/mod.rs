@@ -25,6 +25,8 @@ mod mirror;
 mod native;
 #[cfg(feature = "gui")]
 mod render;
+#[cfg(feature = "gui")]
+mod theme;
 
 /// Parsed `herdr gui` invocation.
 #[derive(Debug, Default)]

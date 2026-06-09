@@ -260,6 +260,25 @@ pub fn validated_sidebar_bounds(min: u16, max: u16) -> Option<(u16, u16)> {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct GuiConfig {
+    /// Base terminal font size in pixels for the native GUI client.
+    pub font_size: f32,
+}
+
+impl Default for GuiConfig {
+    fn default() -> Self {
+        Self { font_size: 15.0 }
+    }
+}
+
+impl GuiConfig {
+    pub fn validated_font_size(self) -> f32 {
+        self.font_size.clamp(10.0, 28.0)
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -270,6 +289,7 @@ pub struct Config {
     pub update: UpdateConfig,
     pub keys: KeysConfig,
     pub ui: UiConfig,
+    pub gui: GuiConfig,
     pub worktrees: WorktreesConfig,
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
@@ -1179,6 +1199,20 @@ delay_seconds = {}
             config.advanced.scrollback_limit_bytes,
             DEFAULT_SCROLLBACK_LIMIT_BYTES
         );
+    }
+
+    #[test]
+    fn gui_font_size_defaults_and_parses() {
+        let default_config = Config::default();
+        assert!((default_config.gui.font_size - 15.0).abs() < f32::EPSILON);
+
+        let toml = r#"
+[gui]
+font_size = 18.0
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!((config.gui.font_size - 18.0).abs() < f32::EPSILON);
+        assert!((config.gui.validated_font_size() - 18.0).abs() < f32::EPSILON);
     }
 
     #[test]
