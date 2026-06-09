@@ -84,6 +84,24 @@ mod tests {
     }
 
     #[test]
+    fn retained_terminal_ids_skip_empty_terminal_ids() {
+        let model = UiModel {
+            all_panes: vec![
+                pane("ws0:tab0:pane0", "term-a", "ws0:tab0"),
+                PaneInfo {
+                    terminal_id: String::new(),
+                    ..pane("ws0:tab0:pane1", "", "ws0:tab0")
+                },
+            ],
+            ..UiModel::default()
+        };
+
+        let retained = model.retained_terminal_ids();
+        assert_eq!(retained.len(), 1);
+        assert!(retained.contains("term-a"));
+    }
+
+    #[test]
     fn retained_terminal_ids_include_every_workspace() {
         let model = UiModel {
             panes: vec![pane("ws0:tab0:pane0", "term-a", "ws0:tab0")],
