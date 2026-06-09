@@ -704,6 +704,8 @@ pub struct WorkspaceInfo {
     pub active_tab_id: String,
     pub agent_status: AgentStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorkspaceWorktreeInfo>,
 }
 
@@ -1357,6 +1359,7 @@ mod tests {
                     tab_count: 1,
                     active_tab_id: "w_1:1".into(),
                     agent_status: AgentStatus::Unknown,
+                    branch: Some("main".into()),
                     worktree: Some(WorkspaceWorktreeInfo {
                         repo_key: "/repo/herdr/.git".into(),
                         repo_name: "herdr".into(),
