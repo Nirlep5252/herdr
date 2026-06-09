@@ -305,6 +305,92 @@ fn apply_terminal_attach_input(
         .map_err(|err| format!("terminal attach input failed: {err}"))
 }
 
+fn apply_terminal_attach_mouse_event(
+    runtime: &crate::terminal::TerminalRuntime,
+    kind: crossterm::event::MouseEventKind,
+    column: u16,
+    row: u16,
+    modifiers: u8,
+) -> Result<(), String> {
+    let mods = KeyModifiers::from_bits_truncate(modifiers);
+    match kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let direction = match kind {
+                MouseEventKind::ScrollUp => AttachScrollDirection::Up,
+                MouseEventKind::ScrollDown => AttachScrollDirection::Down,
+                _ => unreachable!(),
+            };
+            apply_terminal_attach_scroll(
+                runtime,
+                AttachScrollSource::Wheel,
+                direction,
+                1,
+                Some(column),
+                Some(row),
+                modifiers,
+            )
+        }
+        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
+            runtime.scroll_reset();
+            let Some(bytes) = runtime.encode_mouse_wheel(kind, column, row, mods) else {
+                return Ok(());
+            };
+            apply_terminal_attach_input(runtime, bytes)
+        }
+        MouseEventKind::Down(_) | MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {
+            runtime.scroll_reset();
+            let Some(bytes) = runtime.encode_mouse_button(kind, column, row, mods) else {
+                return Ok(());
+            };
+            apply_terminal_attach_input(runtime, bytes)
+        }
+        MouseEventKind::Moved => {
+            let Some(bytes) = runtime.encode_mouse_motion(kind, column, row, mods) else {
+                return Ok(());
+            };
+            apply_terminal_attach_input(runtime, bytes)
+        }
+    }
+}
+
+fn apply_terminal_attach_client_input_event(
+    runtime: &crate::terminal::TerminalRuntime,
+    event: &crate::protocol::ClientInputEvent,
+) -> Result<(), String> {
+    use crate::protocol::ClientInputEvent;
+    match event {
+        ClientInputEvent::Key {
+            code,
+            modifiers,
+            kind,
+        } => {
+            let key = crate::input::TerminalKey::new(
+                code.to_crossterm(),
+                KeyModifiers::from_bits_truncate(*modifiers),
+            )
+            .with_kind(kind.to_crossterm());
+            apply_terminal_attach_input(runtime, runtime.encode_terminal_key(key))
+        }
+        ClientInputEvent::Mouse {
+            kind,
+            column,
+            row,
+            modifiers,
+        } => apply_terminal_attach_mouse_event(
+            runtime,
+            kind.to_crossterm(),
+            *column,
+            *row,
+            *modifiers,
+        ),
+        ClientInputEvent::Paste { text } => {
+            let payload = paste_payload_for_runtime(runtime, text);
+            apply_terminal_attach_input(runtime, payload.into_bytes())
+        }
+        ClientInputEvent::FocusGained | ClientInputEvent::FocusLost => Ok(()),
+    }
+}
+
 #[cfg(windows)]
 fn spawn_windows_client_accept_thread(
     listener: LocalListener,
@@ -1348,6 +1434,36 @@ impl HeadlessServer {
         true
     }
 
+    fn handle_terminal_attach_input_events(
+        &mut self,
+        client_id: u64,
+        terminal_id: &str,
+        events: Vec<crate::protocol::ClientInputEvent>,
+    ) -> bool {
+        let applied = {
+            let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) else {
+                return false;
+            };
+            let mut ok = true;
+            for event in &events {
+                if let Err(err) = apply_terminal_attach_client_input_event(runtime, event) {
+                    warn!(
+                        client_id,
+                        terminal_id,
+                        error = %err,
+                        "terminal attach input event failed"
+                    );
+                    ok = false;
+                }
+            }
+            ok
+        };
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.request_semantic_redraw_after_input();
+        }
+        applied
+    }
+
     fn handle_terminal_attach_scroll(
         &mut self,
         client_id: u64,
@@ -2235,6 +2351,20 @@ impl HeadlessServer {
                     len = events.len(),
                     "client input events received"
                 );
+                let terminal_id = match self.clients.get(&client_id) {
+                    Some(ClientConnection {
+                        mode: ClientConnectionMode::TerminalAttach { terminal_id },
+                        ..
+                    }) => Some(terminal_id.clone()),
+                    _ => None,
+                };
+                if let Some(terminal_id) = terminal_id {
+                    return self.handle_terminal_attach_input_events(
+                        client_id,
+                        &terminal_id,
+                        events,
+                    );
+                }
                 let events = events
                     .iter()
                     .map(crate::protocol::ClientInputEvent::to_raw_input_event)
@@ -4369,6 +4499,71 @@ next_tab = ""
         let metrics = runtime.scroll_metrics().expect("scroll metrics");
         assert_eq!(metrics.offset_from_bottom, 1);
         drop(runtime);
+        drop(_runtime_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn terminal_attach_input_events_route_to_terminal_not_app_state() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _runtime_guard = rt.enter();
+
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("test");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).expect("terminal id").clone();
+        let terminal_id_string = terminal_id.to_string();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Onboarding;
+
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 4);
+        server
+            .app
+            .terminal_runtimes
+            .insert(terminal_id.clone(), runtime);
+
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 9,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 8,
+            cell_height_px: 16,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: true,
+            writer,
+        }));
+        assert!(
+            server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                client_id: 9,
+                terminal_id: terminal_id_string,
+                takeover: false,
+            })
+        );
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 9,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Char('q'),
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+            }],
+        }));
+        assert_eq!(server.app.state.mode, crate::app::Mode::Onboarding);
+        assert!(
+            input_rx.try_recv().expect("attach key input").len() > 0,
+            "key should reach the attached terminal"
+        );
+
+        drop(server);
         drop(_runtime_guard);
         rt.shutdown_timeout(Duration::from_millis(100));
     }

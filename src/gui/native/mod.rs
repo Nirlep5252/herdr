@@ -317,6 +317,16 @@ impl NativeApp {
         self.model.focused_terminal_id().map(|s| s.to_string())
     }
 
+    fn hit_inflated(rect: layout::Rect, x: i32, y: i32, pad: i32) -> bool {
+        layout::Rect::new(
+            rect.x - pad,
+            rect.y - pad,
+            rect.w + pad * 2,
+            rect.h + pad * 2,
+        )
+        .contains(x, y)
+    }
+
     fn pane_at_pixel(&self, x: i32, y: i32) -> Option<(String, i32, i32)> {
         for slot in &self.layout.panes {
             if slot.terminal_id.is_empty() || !slot.content.contains(x, y) {
@@ -387,6 +397,25 @@ impl NativeApp {
             self.send_cmd(Cmd::NewWorkspace);
             return true;
         }
+        // Toolbar buttons before tabs so wide tab strips cannot steal clicks.
+        if Self::hit_inflated(layout.btn_settings, x, y, 4) {
+            self.open_settings();
+            return true;
+        }
+        if Self::hit_inflated(layout.btn_close_pane, x, y, 4) {
+            if let Some(pane_id) = self.model.focused_pane_id.clone() {
+                self.send_cmd(Cmd::ClosePane(pane_id));
+            }
+            return true;
+        }
+        if Self::hit_inflated(layout.btn_split_down, x, y, 4) {
+            self.split_focused(SplitDirection::Down);
+            return true;
+        }
+        if Self::hit_inflated(layout.btn_split_right, x, y, 4) {
+            self.split_focused(SplitDirection::Right);
+            return true;
+        }
         for tab in &layout.tabs {
             if tab.close.contains(x, y) {
                 self.send_cmd(Cmd::CloseTab(tab.tab_id.clone()));
@@ -399,24 +428,6 @@ impl NativeApp {
         }
         if layout.new_tab.contains(x, y) {
             self.send_cmd(Cmd::NewTab);
-            return true;
-        }
-        if layout.btn_split_right.contains(x, y) {
-            self.split_focused(SplitDirection::Right);
-            return true;
-        }
-        if layout.btn_split_down.contains(x, y) {
-            self.split_focused(SplitDirection::Down);
-            return true;
-        }
-        if layout.btn_settings.contains(x, y) {
-            self.settings.open = true;
-            return true;
-        }
-        if layout.btn_close_pane.contains(x, y) {
-            if let Some(pane_id) = self.model.focused_pane_id.clone() {
-                self.send_cmd(Cmd::ClosePane(pane_id));
-            }
             return true;
         }
         false
@@ -564,11 +575,16 @@ impl NativeApp {
 
     fn try_open_settings_shortcut(&mut self, key: &Key) -> bool {
         if self.mods.control_key() && matches!(key, Key::Character(text) if text == ",") {
-            self.settings.open = true;
-            self.request_redraw();
+            self.open_settings();
             return true;
         }
         false
+    }
+
+    fn open_settings(&mut self) {
+        self.settings.open = true;
+        self.settings.select_tab(SettingsSection::Theme);
+        self.request_redraw();
     }
 
     fn begin_selection(&mut self, x: i32, y: i32) {
@@ -833,7 +849,7 @@ impl ApplicationHandler<UserEvent> for NativeApp {
                     if !self.selection_dragging {
                         self.forward_mouse_to_pane(ClientMouseKind::Drag(ClientMouseButton::Left));
                     }
-                } else {
+                } else if !self.mouse_buttons.is_empty() {
                     self.forward_mouse_to_pane(ClientMouseKind::Moved);
                 }
             }
@@ -852,6 +868,9 @@ impl ApplicationHandler<UserEvent> for NativeApp {
                     (ClientMouseButton::Left, ElementState::Pressed) => {
                         if self.handle_chrome_click(x, y) {
                             self.clear_selection();
+                            return;
+                        }
+                        if !self.pane_at_pixel(x, y).is_some() {
                             return;
                         }
                         self.focus_pane_at(x, y);

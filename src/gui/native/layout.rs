@@ -145,7 +145,12 @@ fn layout_tabbar(layout: &mut ViewLayout, model: &UiModel) {
     let mut x = SIDEBAR_W + 8;
     let tab_h = TABBAR_H - 10;
     let tab_y = 5;
+    let right = layout.tabbar.x + layout.tabbar.w - 8;
+    let toolbar_left = right - BTN_W * 4 - 8;
     for tab in &model.tabs {
+        if x + TAB_W > toolbar_left {
+            break;
+        }
         let rect = Rect::new(x, tab_y, TAB_W, tab_h);
         let close = Rect::new(x + TAB_W - 22, tab_y + (tab_h - 16) / 2, 16, 16);
         layout.tabs.push(TabSlot {
@@ -157,9 +162,11 @@ fn layout_tabbar(layout: &mut ViewLayout, model: &UiModel) {
         x += TAB_W + 4;
     }
     layout.new_tab = Rect::new(x, tab_y, tab_h, tab_h);
+    if layout.new_tab.x + layout.new_tab.w > toolbar_left {
+        layout.new_tab = Rect::new(0, 0, 0, 0);
+    }
 
     // Right-aligned pane toolbar.
-    let right = layout.tabbar.x + layout.tabbar.w - 8;
     layout.btn_close_pane = Rect::new(right - BTN_W, tab_y, BTN_W - 4, tab_h);
     layout.btn_settings = Rect::new(right - BTN_W * 2, tab_y, BTN_W - 4, tab_h);
     layout.btn_split_down = Rect::new(right - BTN_W * 3, tab_y, BTN_W - 4, tab_h);
