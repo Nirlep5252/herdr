@@ -13,7 +13,6 @@ mod panes;
 mod view;
 mod worker;
 
-use std::collections::HashSet;
 use std::io;
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -179,16 +178,10 @@ impl NativeApp {
             let rows = (slot.content.h / cell_h).max(1) as u16;
             panes.ensure(&slot.terminal_id, cols, rows);
         }
-        // Keep connections for every pane in the workspace so switching tabs
-        // does not tear down and re-attach (which caused blank panes), only
-        // dropping terminals that left the workspace entirely.
-        let keep: HashSet<String> = self
-            .model
-            .panes
-            .iter()
-            .map(|pane| pane.terminal_id.clone())
-            .collect();
-        panes.retain_visible(&keep);
+        // Keep connections for every pane in every workspace so switching tabs
+        // or spaces does not tear down and re-attach (which caused blank panes),
+        // only dropping terminals that left the server entirely.
+        panes.retain_visible(&self.model.retained_terminal_ids());
     }
 
     fn is_visible(&self, terminal_id: &str) -> bool {

@@ -198,6 +198,15 @@ fn fetch_model(api: &ApiClient) -> Result<UiModel, crate::api::client::ApiClient
         None => Vec::new(),
     };
 
+    let all_panes = match call(
+        api,
+        "gui:pane.list.all",
+        Method::PaneList(PaneListParams { workspace_id: None }),
+    ) {
+        Ok(ResponseResult::PaneList { panes }) => panes,
+        _ => panes.clone(),
+    };
+
     let focused_pane_id = panes
         .iter()
         .find(|pane| pane.focused && Some(&pane.tab_id) == active_tab_id.as_ref())
@@ -224,6 +233,7 @@ fn fetch_model(api: &ApiClient) -> Result<UiModel, crate::api::client::ApiClient
         workspaces,
         tabs,
         panes,
+        all_panes,
         agents,
         layout,
         active_workspace_id,
