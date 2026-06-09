@@ -1,36 +1,18 @@
 //! Draws the native chrome and the terminal panes into the window buffer.
-//!
-//! Chrome (sidebar, tab strip, toolbar, pane captions) is custom-drawn with the
-//! shared [`Canvas`] primitives so it looks like a desktop app rather than a
-//! TUI. Each pane's live terminal content is composited into its content rect
-//! via `render::render_frame_at`, with an optional selection highlight overlaid
-//! on top. Colors follow a Catppuccin-Mocha palette so the app feels cohesive
-//! with herdr's default theme.
+
+use std::collections::HashMap;
 
 use crate::api::schema::{AgentStatus, PaneInfo};
 
 use super::super::color::Rgb;
 use super::super::draw::{self, Canvas};
-use super::super::font::{FontSet, Style};
+use super::super::font::{FontCache, FontSet, Style};
 use super::super::render;
+use super::super::theme::ChromePalette;
 use super::layout::{Rect, ViewLayout, CAPTION_H};
 use super::model::UiModel;
 use super::panes::PaneStreams;
-
-const BASE: Rgb = (30, 30, 46);
-const MANTLE: Rgb = (24, 24, 37);
-const CRUST: Rgb = (17, 17, 27);
-const SURFACE0: Rgb = (49, 50, 68);
-const SURFACE1: Rgb = (69, 71, 90);
-const TEXT: Rgb = (205, 214, 244);
-const SUBTEXT: Rgb = (166, 173, 200);
-const OVERLAY: Rgb = (108, 112, 134);
-const ACCENT: Rgb = (137, 180, 250);
-
-const RED: Rgb = (243, 139, 168);
-const YELLOW: Rgb = (249, 226, 175);
-const BLUE: Rgb = (137, 180, 250);
-const GREEN: Rgb = (166, 227, 161);
+use super::settings::{self, SettingsOverlay};
 
 /// A text selection to highlight within one pane.
 #[derive(Debug, Clone)]
@@ -40,13 +22,13 @@ pub struct Highlight {
     pub end: (u16, u16),
 }
 
-fn status_color(status: AgentStatus) -> Rgb {
+fn status_color(palette: &ChromePalette, status: AgentStatus) -> Rgb {
     match status {
-        AgentStatus::Blocked => RED,
-        AgentStatus::Working => YELLOW,
-        AgentStatus::Done => BLUE,
-        AgentStatus::Idle => GREEN,
-        AgentStatus::Unknown => OVERLAY,
+        AgentStatus::Blocked => palette.red,
+        AgentStatus::Working => palette.yellow,
+        AgentStatus::Done => palette.blue,
+        AgentStatus::Idle => palette.green,
+        AgentStatus::Unknown => palette.overlay,
     }
 }
 
@@ -67,37 +49,84 @@ pub fn render(
     surface_w: usize,
     surface_h: usize,
     fonts: &mut FontSet,
+    font_cache: &mut FontCache,
+    base_font_px: f32,
+    palette: &ChromePalette,
     model: &UiModel,
     layout: &ViewLayout,
     panes: &PaneStreams,
+    pane_zoom: &HashMap<String, f32>,
     selection: Option<&Highlight>,
+    settings: &SettingsOverlay,
 ) {
     let mut canvas = Canvas::new(buffer, surface_w, surface_h);
-    canvas.clear(BASE);
+    canvas.clear(palette.base);
 
-    draw_sidebar(&mut canvas, fonts, model, layout);
-    draw_tabbar(&mut canvas, fonts, model, layout);
-    draw_panes(&mut canvas, fonts, model, layout, panes, selection);
+    draw_sidebar(&mut canvas, fonts, palette, model, layout);
+    draw_tabbar(&mut canvas, fonts, palette, model, layout);
+    draw_panes(
+        &mut canvas,
+        fonts,
+        font_cache,
+        base_font_px,
+        palette,
+        model,
+        layout,
+        panes,
+        pane_zoom,
+        selection,
+    );
+
+    if settings.open {
+        settings::render(
+            &mut canvas,
+            fonts,
+            palette,
+            settings,
+            surface_w as i32,
+            surface_h as i32,
+        );
+    }
 }
 
-fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layout: &ViewLayout) {
+fn draw_sidebar(
+    canvas: &mut Canvas,
+    fonts: &mut FontSet,
+    palette: &ChromePalette,
+    model: &UiModel,
+    layout: &ViewLayout,
+) {
     let sb = layout.sidebar;
     let cell_h = fonts.cell_height() as i32;
     let cell_w = fonts.cell_width() as i32;
-    canvas.fill_rect(sb.x, sb.y, sb.w, sb.h, MANTLE);
-    canvas.fill_rect(sb.x + sb.w - 1, sb.y, 1, sb.h, CRUST);
+    canvas.fill_rect(sb.x, sb.y, sb.w, sb.h, palette.mantle);
+    canvas.fill_rect(sb.x + sb.w - 1, sb.y, 1, sb.h, palette.crust);
 
     let pad = 10;
     let label_max = sb.x + sb.w - pad;
-    canvas.text(fonts, pad, 10, "SPACES", Style::Bold, OVERLAY, label_max);
+    canvas.text(
+        fonts,
+        pad,
+        10,
+        "SPACES",
+        Style::Bold,
+        palette.overlay,
+        label_max,
+    );
 
     for row in &layout.workspace_rows {
         let Some(ws) = model.workspaces.iter().find(|w| w.workspace_id == row.id) else {
             continue;
         };
         if row.focused {
-            canvas.fill_rect(row.rect.x, row.rect.y, row.rect.w, row.rect.h, SURFACE0);
-            canvas.fill_rect(row.rect.x, row.rect.y, 3, row.rect.h, ACCENT);
+            canvas.fill_rect(
+                row.rect.x,
+                row.rect.y,
+                row.rect.w,
+                row.rect.h,
+                palette.surface0,
+            );
+            canvas.fill_rect(row.rect.x, row.rect.y, 3, row.rect.h, palette.accent);
         }
         let line1_y = row.rect.y + 6;
         let line2_y = line1_y + cell_h + 2;
@@ -105,11 +134,15 @@ fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layou
             row.rect.x + 14,
             line1_y + cell_h / 2,
             4,
-            status_color(ws.agent_status),
+            status_color(palette, ws.agent_status),
         );
         let max_cells = ((row.rect.w - 30) / cell_w).max(1) as usize;
         let label = draw::truncate_cells(&ws.label, max_cells);
-        let fg = if row.focused { TEXT } else { SUBTEXT };
+        let fg = if row.focused {
+            palette.text
+        } else {
+            palette.subtext
+        };
         canvas.text(
             fonts,
             row.rect.x + 26,
@@ -127,7 +160,7 @@ fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layou
                 line2_y,
                 &sub,
                 Style::Regular,
-                OVERLAY,
+                palette.overlay,
                 label_max,
             );
         } else if let Some(worktree) = ws.worktree.as_ref() {
@@ -138,7 +171,7 @@ fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layou
                 line2_y,
                 &sub,
                 Style::Regular,
-                OVERLAY,
+                palette.overlay,
                 label_max,
             );
         }
@@ -152,7 +185,7 @@ fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layou
             header_y,
             "AGENTS",
             Style::Bold,
-            OVERLAY,
+            palette.overlay,
             label_max,
         );
     }
@@ -161,8 +194,14 @@ fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layou
             continue;
         };
         if row.focused {
-            canvas.fill_rect(row.rect.x, row.rect.y, row.rect.w, row.rect.h, SURFACE0);
-            canvas.fill_rect(row.rect.x, row.rect.y, 3, row.rect.h, ACCENT);
+            canvas.fill_rect(
+                row.rect.x,
+                row.rect.y,
+                row.rect.w,
+                row.rect.h,
+                palette.surface0,
+            );
+            canvas.fill_rect(row.rect.x, row.rect.y, 3, row.rect.h, palette.accent);
         }
         let line1_y = row.rect.y + 6;
         let line2_y = line1_y + cell_h + 2;
@@ -170,7 +209,7 @@ fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layou
             row.rect.x + 14,
             line1_y + cell_h / 2,
             4,
-            status_color(agent.agent_status),
+            status_color(palette, agent.agent_status),
         );
 
         let ws_label = model
@@ -182,7 +221,11 @@ fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layou
             None => agent.workspace_id.clone(),
         };
         let max_cells = ((row.rect.w - 30) / cell_w).max(1) as usize;
-        let fg = if row.focused { TEXT } else { SUBTEXT };
+        let fg = if row.focused {
+            palette.text
+        } else {
+            palette.subtext
+        };
         canvas.text(
             fonts,
             row.rect.x + 26,
@@ -206,13 +249,13 @@ fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layou
             line2_y,
             &draw::truncate_cells(&detail, max_cells),
             Style::Regular,
-            status_color(agent.agent_status),
+            status_color(palette, agent.agent_status),
             label_max,
         );
     }
 
     let nw = layout.new_workspace;
-    canvas.fill_rect(nw.x, nw.y, nw.w, nw.h, SURFACE0);
+    canvas.fill_rect(nw.x, nw.y, nw.w, nw.h, palette.surface0);
     let nw_y = nw.y + (nw.h - cell_h) / 2;
     canvas.text(
         fonts,
@@ -220,29 +263,43 @@ fn draw_sidebar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layou
         nw_y,
         "+ new space",
         Style::Regular,
-        TEXT,
+        palette.text,
         nw.x + nw.w,
     );
 }
 
-fn draw_tabbar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layout: &ViewLayout) {
+fn draw_tabbar(
+    canvas: &mut Canvas,
+    fonts: &mut FontSet,
+    palette: &ChromePalette,
+    model: &UiModel,
+    layout: &ViewLayout,
+) {
     let tb = layout.tabbar;
     let cell_w = fonts.cell_width() as i32;
     let cell_h = fonts.cell_height() as i32;
     let text_y = |rect: Rect| rect.y + (rect.h - cell_h) / 2;
-    canvas.fill_rect(tb.x, tb.y, tb.w, tb.h, CRUST);
-    canvas.fill_rect(tb.x, tb.y + tb.h - 1, tb.w, 1, MANTLE);
+    canvas.fill_rect(tb.x, tb.y, tb.w, tb.h, palette.crust);
+    canvas.fill_rect(tb.x, tb.y + tb.h - 1, tb.w, 1, palette.mantle);
 
     for tab in &layout.tabs {
-        let bg = if tab.focused { BASE } else { SURFACE0 };
+        let bg = if tab.focused {
+            palette.base
+        } else {
+            palette.surface0
+        };
         canvas.fill_rect(tab.rect.x, tab.rect.y, tab.rect.w, tab.rect.h, bg);
         if tab.focused {
-            canvas.fill_rect(tab.rect.x, tab.rect.y, tab.rect.w, 2, ACCENT);
+            canvas.fill_rect(tab.rect.x, tab.rect.y, tab.rect.w, 2, palette.accent);
         }
         if let Some(info) = model.tabs.iter().find(|t| t.tab_id == tab.tab_id) {
             let max_cells = ((tab.rect.w - 36) / cell_w).max(1) as usize;
             let label = draw::truncate_cells(&info.label, max_cells);
-            let fg = if tab.focused { TEXT } else { SUBTEXT };
+            let fg = if tab.focused {
+                palette.text
+            } else {
+                palette.subtext
+            };
             canvas.text(
                 fonts,
                 tab.rect.x + 10,
@@ -260,12 +317,12 @@ fn draw_tabbar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layout
             tab.close.x,
             tab.close.y,
             fonts.ascent(),
-            SUBTEXT,
+            palette.subtext,
         );
     }
 
     let nt = layout.new_tab;
-    canvas.fill_rect(nt.x, nt.y, nt.w, nt.h, SURFACE0);
+    canvas.fill_rect(nt.x, nt.y, nt.w, nt.h, palette.surface0);
     canvas.draw_glyph(
         fonts,
         '+',
@@ -273,13 +330,14 @@ fn draw_tabbar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layout
         nt.x + (nt.w - cell_w) / 2,
         text_y(nt),
         fonts.ascent(),
-        TEXT,
+        palette.text,
     );
 
-    draw_split_button(canvas, layout.btn_split_right, true);
-    draw_split_button(canvas, layout.btn_split_down, false);
+    draw_split_button(canvas, palette, layout.btn_split_right, true);
+    draw_split_button(canvas, palette, layout.btn_split_down, false);
+    draw_settings_button(canvas, fonts, palette, layout.btn_settings);
     let cp = layout.btn_close_pane;
-    canvas.fill_rect(cp.x, cp.y, cp.w, cp.h, SURFACE0);
+    canvas.fill_rect(cp.x, cp.y, cp.w, cp.h, palette.surface0);
     canvas.draw_glyph(
         fonts,
         '×',
@@ -287,19 +345,39 @@ fn draw_tabbar(canvas: &mut Canvas, fonts: &mut FontSet, model: &UiModel, layout
         cp.x + (cp.w - cell_w) / 2,
         text_y(cp),
         fonts.ascent(),
-        TEXT,
+        palette.text,
     );
 }
 
-fn draw_split_button(canvas: &mut Canvas, rect: Rect, vertical: bool) {
-    canvas.fill_rect(rect.x, rect.y, rect.w, rect.h, SURFACE0);
+fn draw_split_button(canvas: &mut Canvas, palette: &ChromePalette, rect: Rect, vertical: bool) {
+    canvas.fill_rect(rect.x, rect.y, rect.w, rect.h, palette.surface0);
     let icon = Rect::new(rect.x + rect.w / 2 - 7, rect.y + rect.h / 2 - 6, 14, 12);
-    canvas.stroke_rect(icon.x, icon.y, icon.w, icon.h, 1, TEXT);
+    canvas.stroke_rect(icon.x, icon.y, icon.w, icon.h, 1, palette.text);
     if vertical {
-        canvas.fill_rect(icon.x + icon.w / 2, icon.y, 1, icon.h, TEXT);
+        canvas.fill_rect(icon.x + icon.w / 2, icon.y, 1, icon.h, palette.text);
     } else {
-        canvas.fill_rect(icon.x, icon.y + icon.h / 2, icon.w, 1, TEXT);
+        canvas.fill_rect(icon.x, icon.y + icon.h / 2, icon.w, 1, palette.text);
     }
+}
+
+fn draw_settings_button(
+    canvas: &mut Canvas,
+    fonts: &mut FontSet,
+    palette: &ChromePalette,
+    rect: Rect,
+) {
+    canvas.fill_rect(rect.x, rect.y, rect.w, rect.h, palette.surface0);
+    let cx = rect.x + rect.w / 2;
+    let cy = rect.y + rect.h / 2;
+    canvas.stroke_rect(cx - 6, cy - 6, 12, 12, 1, palette.text);
+    for angle in [0.0_f64, 1.25, 2.5, 3.75, 5.0] {
+        let (sin, cos) = angle.sin_cos();
+        let x = cx + (sin * 7.0) as i32;
+        let y = cy - (cos * 7.0) as i32;
+        canvas.fill_rect(x - 1, y - 1, 3, 3, palette.text);
+    }
+    canvas.fill_rect(cx - 2, cy - 2, 4, 4, palette.text);
+    let _ = (fonts, cx, cy);
 }
 
 fn caption_label(pane: &PaneInfo) -> String {
@@ -313,28 +391,36 @@ fn caption_label(pane: &PaneInfo) -> String {
 
 fn draw_panes(
     canvas: &mut Canvas,
-    fonts: &mut FontSet,
+    chrome_fonts: &mut FontSet,
+    font_cache: &mut FontCache,
+    base_font_px: f32,
+    palette: &ChromePalette,
     model: &UiModel,
     layout: &ViewLayout,
     panes: &PaneStreams,
+    pane_zoom: &HashMap<String, f32>,
     selection: Option<&Highlight>,
 ) {
-    let cell_w = fonts.cell_width() as i32;
-    let cell_h = fonts.cell_height() as i32;
+    let chrome_cell_w = chrome_fonts.cell_width() as i32;
+    let chrome_cell_h = chrome_fonts.cell_height() as i32;
     for slot in &layout.panes {
         canvas.fill_rect(
             slot.rect.x,
             slot.rect.y,
             slot.rect.w,
             CAPTION_H,
-            if slot.focused { SURFACE1 } else { SURFACE0 },
+            if slot.focused {
+                palette.surface1
+            } else {
+                palette.surface0
+            },
         );
         canvas.fill_rect(
             slot.content.x,
             slot.content.y,
             slot.content.w,
             slot.content.h,
-            BASE,
+            palette.base,
         );
 
         if let Some(pane) = model.panes.iter().find(|p| p.pane_id == slot.pane_id) {
@@ -342,14 +428,18 @@ fn draw_panes(
                 slot.rect.x + 12,
                 slot.rect.y + CAPTION_H / 2,
                 4,
-                status_color(pane.agent_status),
+                status_color(palette, pane.agent_status),
             );
-            let max_cells = ((slot.rect.w - 30) / cell_w).max(1) as usize;
+            let max_cells = ((slot.rect.w - 30) / chrome_cell_w).max(1) as usize;
             let label = draw::truncate_cells(&caption_label(pane), max_cells);
-            let y = slot.rect.y + (CAPTION_H - cell_h) / 2;
-            let fg = if slot.focused { TEXT } else { SUBTEXT };
+            let y = slot.rect.y + (CAPTION_H - chrome_cell_h) / 2;
+            let fg = if slot.focused {
+                palette.text
+            } else {
+                palette.subtext
+            };
             canvas.text(
-                fonts,
+                chrome_fonts,
                 slot.rect.x + 24,
                 y,
                 &label,
@@ -359,22 +449,49 @@ fn draw_panes(
             );
         }
 
-        if let Some(frame) = panes.frame(&slot.terminal_id) {
-            render::render_frame_at(frame, fonts, canvas, slot.content.x, slot.content.y);
-            if let Some(hl) = selection.filter(|h| h.terminal_id == slot.terminal_id) {
-                draw_selection(
-                    canvas,
-                    slot.content,
-                    frame.width,
-                    frame.height,
-                    cell_w,
-                    cell_h,
-                    hl,
+        let zoom = pane_zoom
+            .get(&slot.terminal_id)
+            .copied()
+            .unwrap_or(1.0)
+            .clamp(0.5, 2.5);
+        let pane_px = base_font_px * zoom;
+        if let Ok(pane_fonts) = font_cache.get(pane_px) {
+            let cell_w = pane_fonts.cell_width() as i32;
+            let cell_h = pane_fonts.cell_height() as i32;
+            if let Some(frame) = panes.frame(&slot.terminal_id) {
+                render::render_frame_at(frame, pane_fonts, canvas, slot.content.x, slot.content.y);
+                if let Some(hl) = selection.filter(|h| h.terminal_id == slot.terminal_id) {
+                    draw_selection(
+                        canvas,
+                        palette,
+                        slot.content,
+                        frame.width,
+                        frame.height,
+                        cell_w,
+                        cell_h,
+                        hl,
+                    );
+                }
+            }
+            if zoom != 1.0 {
+                let zoom_label = format!("{:.0}%", zoom * 100.0);
+                canvas.text(
+                    chrome_fonts,
+                    slot.content.x + slot.content.w - 48,
+                    slot.content.y + 4,
+                    &zoom_label,
+                    Style::Regular,
+                    palette.overlay,
+                    slot.content.x + slot.content.w,
                 );
             }
         }
 
-        let border = if slot.focused { ACCENT } else { SURFACE0 };
+        let border = if slot.focused {
+            palette.accent
+        } else {
+            palette.surface0
+        };
         let thickness = if slot.focused { 2 } else { 1 };
         canvas.stroke_rect(
             slot.rect.x,
@@ -389,6 +506,7 @@ fn draw_panes(
 
 fn draw_selection(
     canvas: &mut Canvas,
+    palette: &ChromePalette,
     content: Rect,
     width: u16,
     height: u16,
@@ -413,7 +531,7 @@ fn draw_selection(
         let x = content.x + col_lo as i32 * cell_w;
         let w = (col_hi - col_lo + 1) as i32 * cell_w;
         let y = content.y + row as i32 * cell_h;
-        canvas.fill_rect_alpha(x, y, w, cell_h, ACCENT, 130);
+        canvas.fill_rect_alpha(x, y, w, cell_h, palette.accent, 130);
     }
 }
 

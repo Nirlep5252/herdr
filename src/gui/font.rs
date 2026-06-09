@@ -9,6 +9,27 @@ use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings};
 
+/// Caches [`FontSet`] instances keyed by pixel size (rounded to 0.1px).
+#[derive(Default)]
+pub struct FontCache {
+    cache: HashMap<u32, FontSet>,
+}
+
+impl FontCache {
+    pub fn get(&mut self, px: f32) -> Result<&mut FontSet, String> {
+        use std::collections::hash_map::Entry;
+        let key = (px * 10.0).round() as u32;
+        if let Entry::Vacant(entry) = self.cache.entry(key) {
+            entry.insert(FontSet::load(px)?);
+        }
+        Ok(self.cache.get_mut(&key).expect("font cache entry present"))
+    }
+
+    pub fn clear(&mut self) {
+        self.cache.clear();
+    }
+}
+
 const REGULAR_TTF: &[u8] = include_bytes!("../../assets/fonts/DejaVuSansMono.ttf");
 const BOLD_TTF: &[u8] = include_bytes!("../../assets/fonts/DejaVuSansMono-Bold.ttf");
 const OBLIQUE_TTF: &[u8] = include_bytes!("../../assets/fonts/DejaVuSansMono-Oblique.ttf");

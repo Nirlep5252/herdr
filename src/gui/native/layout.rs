@@ -79,6 +79,7 @@ pub struct ViewLayout {
     pub new_tab: Rect,
     pub btn_split_right: Rect,
     pub btn_split_down: Rect,
+    pub btn_settings: Rect,
     pub btn_close_pane: Rect,
     pub panes: Vec<PaneSlot>,
 }
@@ -160,8 +161,9 @@ fn layout_tabbar(layout: &mut ViewLayout, model: &UiModel) {
     // Right-aligned pane toolbar.
     let right = layout.tabbar.x + layout.tabbar.w - 8;
     layout.btn_close_pane = Rect::new(right - BTN_W, tab_y, BTN_W - 4, tab_h);
-    layout.btn_split_down = Rect::new(right - BTN_W * 2, tab_y, BTN_W - 4, tab_h);
-    layout.btn_split_right = Rect::new(right - BTN_W * 3, tab_y, BTN_W - 4, tab_h);
+    layout.btn_settings = Rect::new(right - BTN_W * 2, tab_y, BTN_W - 4, tab_h);
+    layout.btn_split_down = Rect::new(right - BTN_W * 3, tab_y, BTN_W - 4, tab_h);
+    layout.btn_split_right = Rect::new(right - BTN_W * 4, tab_y, BTN_W - 4, tab_h);
 }
 
 fn layout_panes(layout: &mut ViewLayout, model: &UiModel, content: Rect) {
